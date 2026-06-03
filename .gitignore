@@ -1,0 +1,10 @@
+# Built binary
+/cyclecount
+
+# Go test/coverage artifacts
+*.out
+*.test
+
+# Editor/OS noise
+.DS_Store
+*.swp
