@@ -9,6 +9,11 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Run bundled JS actions on Node 24 so the Node 20 deprecation notice is gone
+# (setup-go still ships Node 20 today). Drop once the actions default to Node 24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
 
   build:
