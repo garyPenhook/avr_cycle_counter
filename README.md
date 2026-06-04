@@ -83,11 +83,53 @@ macOS `brew install avr-gcc`, or Microchip's official AVR/GNU toolchain.
 it lives somewhere unusual, point at it with `-objdump /path/to/avr-objdump`.
 Source-mode analysis needs none of this.
 
+### Platforms
+
+`cyclecount` is **pure Go** — only the standard library, no cgo, no
+platform-specific code or build tags. It builds and runs anywhere the Go
+toolchain targets:
+
+| OS | notes |
+|----|-------|
+| **Linux** | x86-64, arm64, and every other Go arch; static `CGO_ENABLED=0` builds work |
+| **macOS** | Intel and Apple Silicon (arm64) |
+| **Windows** | native `.exe`; `avr-objdump.exe` / `avr-gcc.exe` are found on `%PATH%` |
+| **\*BSD, etc.** | any `GOOS`/`GOARCH` pair `go` supports |
+
+Source-mode analysis is the same on every OS. The optional binary front end
+(`avr-objdump`) and `-cpp` (`avr-gcc`) just need those executables on your path
+for the OS you run on — there is nothing OS-specific in `cyclecount` itself.
+
+## Install
+
+With a Go toolchain (**Go ≥ 1.26**, see `go.mod`), build from a checkout:
+
+```sh
+git clone <repo-url> && cd Count_Cycles
+go install .          # → $GOBIN (or $GOPATH/bin, default ~/go/bin)
+```
+
+`go install .` drops a `cyclecount` (or `cyclecount.exe` on Windows) binary in
+your Go bin directory; add that directory to `PATH` if it isn't already. The
+module is named `cyclecount` locally, so the remote `go install <path>@latest`
+form does not apply — clone first, then `go install .` (or just `go build`,
+below, and copy the binary wherever you like).
+
 ## Build
 
 ```sh
 go build -trimpath -ldflags="-s -w" -o cyclecount .   # stripped release binary
-go test ./...
+go test ./...                                          # run the unit tests
+go vet ./...                                           # static checks
+```
+
+Cross-compile for another OS/arch by setting `GOOS`/`GOARCH` — no extra
+toolchain needed because there is no cgo:
+
+```sh
+GOOS=windows GOARCH=amd64 go build -o cyclecount.exe .
+GOOS=darwin  GOARCH=arm64 go build -o cyclecount-macos-arm64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cyclecount-linux-arm64 .
 ```
 
 (If a stray `.git` in a parent directory makes `go build` complain about VCS
@@ -96,10 +138,39 @@ stamping, prefix with `GOFLAGS=-buildvcs=false`.)
 ## Usage
 
 ```
-cyclecount [flags] <file.S>
+cyclecount [flags] <file>
 ```
 
-Flags **must precede** the file (Go's flag parser stops at the first operand):
+`<file>` is a single input — assembler source, or a compiled object the tool
+disassembles (see [Input](#input-source-or-compiled-binary)). Flags **must
+precede** the file (Go's flag parser stops at the first operand), so
+`cyclecount delay.S -v` is wrong; write `cyclecount -v delay.S`.
+
+### Quick start
+
+```sh
+# 1. analyze a source file with the default target (ATtiny3217 / AVRxt)
+cyclecount examples/delay.S
+
+# 2. pick your real part and add a clock for wall-clock time
+cyclecount -mcu atmega328p -clock 16 examples/delay.S
+
+# 3. see the per-instruction breakdown
+cyclecount -mcu atmega328p -v examples/delay.S
+
+# 4. focus on a hot loop and give its trip count
+cyclecount -from .L_inner -to .L_inner -iter 1000 examples/delay.S
+
+# 5. prove an optimisation against a baseline
+cyclecount -vs examples/scale_mul.S examples/scale_shift.S
+
+# 6. gate it in CI — non-zero exit if the loop blows its cycle budget
+cyclecount -from loop -to done -max-cycles 40 hot.S
+```
+
+### Flags
+
+The full set (all optional; sensible defaults shown in parentheses):
 
 | flag         | meaning                                                       |
 |--------------|---------------------------------------------------------------|
@@ -112,6 +183,127 @@ Flags **must precede** the file (Go's flag parser stops at the first operand):
 | `-vs FILE`   | diff the target file against a baseline (same core)           |
 | `-json`      | machine-readable output                                       |
 | `-objdump P` | objdump binary for binary input (default `avr-objdump`)       |
+| `-max-cycles N` / `-max-flash N` / `-max-sram N` | CI budget gate: exit 3 if a cost exceeds the limit |
+| `-cpp`       | run the C preprocessor over `.S`/`.s` source before parsing   |
+| `-cc P`      | compiler driver used for `-cpp` (default `avr-gcc`)           |
+| `-D NAME=VAL` / `-I DIR` | preprocessor define / include dir for `-cpp` (repeatable) |
+
+### Reading the report
+
+A plain run prints a header, one block per analyzed span, the static-SRAM
+tally, and footnotes:
+
+```
+$ cyclecount examples/delay.S
+AVR cycle & size report — examples/delay.S
+Target: ATtiny3217 (core AVRxt, 16-bit PC).      ← resolved target + PC width
+Cycle data: AVR Instruction Set Manual DS40002198C.
+Clock: 20 MHz.                                    ← from -clock (omit with -clock 0)
+
+== (whole file) ==                               ← every span gets a block
+  Instructions   : 8                             ← instructions valid on this core
+  Flash          : 18 bytes (9 words)            ← code (+ inline flash data, if any)
+  Cycles/pass    : 17 – 18  (min–max)            ← honest bounds; branches vary
+  Time @20MHz    : 850.0 ns – 900.0 ns           ← cycles ÷ clock
+  Stack (SRAM)   : peak 1 B (1 PUSH / 1 POP)     ← peak push depth + call frames
+
+== inner ==                                      ← an @begin/@end annotated region
+  Instructions   : 2
+  Flash          : 4 bytes (2 words)
+  Cycles/pass    : 3 – 4  (min–max)
+  Cycles × 1000  : 3000 – 4000                   ← × the region's iter=1000
+  Time @20MHz    : 150.000 µs – 200.000 µs
+
+== static SRAM (.data/.bss/.noinit) ==
+  Allocated      : 32 bytes                      ← deterministic RAM (not stack)
+    .bss       : 32 B                            ← per-section breakdown
+
+Notes: branch/skip cycles are min–max; the exact path depends on data.
+LD/ST/LDS/STS add 1 cycle when the access targets NVM (manual note 2).
+```
+
+Add `-v` for a per-instruction table (line, mnemonic, operands, words, cycles,
+and a note such as which cores differ):
+
+```
+$ cyclecount -v examples/scale_mul.S
+  line  mnemonic  operands  words  cycles  note
+  ----  --------  --------  -----  ------  ----
+  7     LDI       r25, 10   1      1
+  8     MUL       r24, r25  1      2       hardware multiplier
+  9     MOV       r24, r0   1      1
+  10    CLR       r1        1      1
+  11    RET                 1      4       16-bit PC; +1 cycle on 22-bit-PC parts
+```
+
+Instructions are classified per target and flagged when they need attention:
+**✘ unavailable** (exists on other cores, not this one — won't assemble),
+**● not modeled** (recognised, but the cycle count is data/programming
+dependent, e.g. `SPM`), **⚠ unrecognised** (not in the ISA table — check syntax).
+
+### Exit codes
+
+`cyclecount` uses its exit status so scripts and CI can branch on it:
+
+| code | meaning |
+|------|---------|
+| `0`  | success — analysis printed (and all budgets, if any, within limits) |
+| `1`  | tool error — file not found, `avr-objdump`/`avr-gcc` missing or failed, bad label |
+| `2`  | usage error — no file given, or a flag placed after the file |
+| `3`  | a cost **budget was exceeded** (see below) — analysis still printed |
+
+### Gate a build on a cost budget
+
+For CI, set a ceiling and let a regression fail the build. Any exceeded limit
+prints an `EXCEEDED` line and makes `cyclecount` exit **3** (distinct from `1`
+for tool errors and `2` for usage), so a Makefile or workflow step stops:
+
+```sh
+# the hot loop must stay within 40 cycles per pass, the image within 8 KB flash
+cyclecount -mcu attiny3217 -from loop -to done -max-cycles 40 hot.S
+cyclecount -mcu atmega328p -max-flash 8192 -max-sram 2048 firmware.o
+```
+
+`-max-cycles` gates the worst-case total of the primary span — the `-from`/`-to`
+range (× `iter`) when given, otherwise the whole file. `-max-flash` and
+`-max-sram` gate the whole-file flash footprint and static `.data`/`.bss` use.
+The budget result is also included in `-json` output under `"budgets"`.
+
+A budget run still prints the full report, then a `== budget ==` summary:
+
+```
+== budget ==
+  cycles   : 44 / 40 limit — EXCEEDED (range loop:done)
+  Verdict: budget exceeded (exit 3).
+```
+
+Drop it into CI — the non-zero exit fails the job automatically:
+
+```yaml
+# .github/workflows/timing.yml
+- name: enforce hot-path budget
+  run: |
+    go build -o cyclecount .
+    ./cyclecount -mcu attiny3217 -from loop -to done \
+      -iter 1000 -max-cycles 4000 firmware.S
+```
+
+### Expand the C preprocessor on source
+
+By default the source parser skips `#`-lines, so a `.S` that relies on
+`#include`, `#define`, or `#if` is analyzed with those unresolved (and **both**
+arms of an `#if/#else` counted). Pass `-cpp` to run the source through the
+compiler driver's preprocessor (`avr-gcc -E -x assembler-with-cpp`) first:
+
+```sh
+cyclecount -mcu atmega328p -cpp -D F_CPU=16000000 blink.S
+cyclecount -mcu attiny3217 -cpp -I ./include firmware.S
+```
+
+With `-mcu` set, `-cpp` passes `-mmcu=` so `<avr/io.h>` and register macros
+resolve to the right device. This covers the **C** preprocessor only — GNU-as
+`.macro`/`.include` are expanded by the assembler, not cpp, so for those keep
+analyzing a compiled `.o`/ELF.
 
 ### Input: source *or* compiled binary
 
@@ -163,6 +355,41 @@ $ cyclecount -vs examples/scale_mul.S examples/scale_shift.S
   Verdict: costs 1 more cycles (worst case), costs 4 more flash bytes, same SRAM bytes.
 ```
 
+### Machine-readable output (`-json`)
+
+`-json` prints the same numbers as a single JSON object instead of text — for
+dashboards, regression tracking, or piping into `jq`. It carries the resolved
+`target`, the `whole_file` metrics, any annotated `regions`, an optional
+`range` (with `-from`/`-to`), `sram_static_bytes`, and a `budgets` array when
+limits are set. With `-vs` it emits a comparison object (`new`, `baseline`,
+`delta`) instead.
+
+```sh
+cyclecount -json -mcu atmega328p firmware.o | jq '.whole_file.cycles_max'
+```
+
+```json
+{
+  "file": "examples/scale_mul.S",
+  "target": { "name": "ATtiny3217", "core": "AVRxt", "pc_bits": 16 },
+  "whole_file": {
+    "name": "(whole file)", "iter": 1,
+    "instructions": 5, "flash_words": 5, "flash_bytes": 10,
+    "cycles_min": 9, "cycles_max": 9,
+    "cycles_min_total": 9, "cycles_max_total": 9,
+    "peak_stack_bytes": 0, "pushes": 0, "pops": 0, "calls": 0
+  },
+  "sram_static_bytes": 0,
+  "budgets": [
+    { "name": "flash", "limit": 16, "got": 10, "unit": " B",
+      "scope": "whole file", "ok": true }
+  ]
+}
+```
+
+When a budget is exceeded the JSON is still printed in full (with `"ok": false`)
+and the process exits `3`, so CI sees both the data and the failure.
+
 ## What it measures
 
 - **Instructions** valid for the selected core (whole file, each annotated
@@ -175,9 +402,8 @@ $ cyclecount -vs examples/scale_mul.S examples/scale_shift.S
 - **SRAM (stack)**: peak `PUSH` depth and call return-address bytes (2 or 3,
   per PC width).
 
-Instructions are classified per target: **✘ unavailable** (exists on other
-cores but not this one — won't assemble), **● not modeled** (recognised but
-cycle count is data/programming dependent, e.g. `SPM`), **⚠ unrecognised**.
+Each instruction is also classified per target (`✘` unavailable, `●` not
+modeled, `⚠` unrecognised) — see [Reading the report](#reading-the-report).
 
 ## Limitations
 
@@ -186,9 +412,9 @@ cycle count is data/programming dependent, e.g. `SPM`), **⚠ unrecognised**.
   are bounds, not one executed path.
 - `LD`/`ST`/`LDD` addressing-mode timing on AVRxm and AVRrc is given as a range
   (the manual splits it by mode); AVRe and AVRxt are exact.
-- In **source** mode, macros and `.include` are not expanded and
-  `#`-preprocessor lines are skipped — feed a compiled `.o`/ELF (which
-  `cyclecount` disassembles) when you need those resolved.
+- In **source** mode, the C preprocessor is applied only with `-cpp`; GNU-as
+  `.macro`/`.include` are never expanded — feed a compiled `.o`/ELF (which
+  `cyclecount` disassembles) when you need assembler macros resolved.
 - The device list is curated, not exhaustive — any unlisted AVR works via
   `-core` (and `-pc` for >128 KB parts).
 
@@ -200,6 +426,7 @@ internal/isa/isa.go      per-core instruction timing + availability (DS40002198C
 internal/isa/device.go   part-number → core / PC-width map
 internal/asm/asm.go      .S parser: lines, sections, data sizes, annotations
 internal/asm/objdump.go  binary front end: ELF/.o/.hex via avr-objdump
+internal/asm/cpp.go      C-preprocessor front end (-cpp) via avr-gcc -E
 internal/analyze/        instruction/cycle/flash/SRAM accounting per target
 examples/                delay.S, scale_mul.S, scale_shift.S
 ```
