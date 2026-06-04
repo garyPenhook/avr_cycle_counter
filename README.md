@@ -66,6 +66,23 @@ Call/return/stack figures depend on the **Program Counter width**: ≤128 KB
 parts use a 16-bit PC (2-byte return address); larger parts (e.g. ATmega2560)
 use a 22-bit PC, which adds one cycle to `CALL`/`RCALL`/`ICALL`/`RET`/`RETI`.
 
+## Requirements
+
+| to do this | you need |
+|------------|----------|
+| build `cyclecount` | **Go ≥ 1.26** (see `go.mod`) |
+| analyze `.S`/`.s` **source** | nothing else — pure Go, no external tools |
+| analyze a compiled **ELF / `.o` / `.hex`** | **AVR binutils** providing `avr-objdump` on your `$PATH` |
+
+`avr-objdump` ships with the AVR GNU toolchain (the same package that gives you
+`avr-gcc`). Install it with your system's package manager — e.g. Debian/Ubuntu
+`sudo apt install binutils-avr gcc-avr`, Arch `pacman -S avr-binutils avr-gcc`,
+macOS `brew install avr-gcc`, or Microchip's official AVR/GNU toolchain.
+
+`cyclecount` finds `avr-objdump` via your `$PATH` (it hard-codes no paths); if
+it lives somewhere unusual, point at it with `-objdump /path/to/avr-objdump`.
+Source-mode analysis needs none of this.
+
 ## Build
 
 ```sh
