@@ -45,6 +45,23 @@ func TestEvalBudgets(t *testing.T) {
 	}
 }
 
+func TestCPPMCU(t *testing.T) {
+	cases := []struct {
+		mcu, core, want string
+	}{
+		{"", "", defaultMCU},              // pure default target → default part's headers
+		{"atmega328p", "", "atmega328p"},  // explicit -mcu wins
+		{"ATmega328P", "", "atmega328p"},  // normalized to lowercase for avr-gcc
+		{"", "avrrc", ""},                 // bare -core has no single device
+		{"attiny10", "avrrc", "attiny10"}, // -mcu still wins over -core
+	}
+	for _, c := range cases {
+		if got := cppMCU(c.mcu, c.core); got != c.want {
+			t.Errorf("cppMCU(%q,%q)=%q, want %q", c.mcu, c.core, got, c.want)
+		}
+	}
+}
+
 func TestEvalBudgetsCyclesScopeAndIter(t *testing.T) {
 	res := analyze.Result{File: analyze.Metrics{Name: "(whole file)", Iter: 1, CyclesMax: 18}}
 	// A range with a trip count: the budget gates CyclesMax * iter.

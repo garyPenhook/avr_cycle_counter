@@ -268,6 +268,8 @@ cyclecount -mcu atmega328p -max-flash 8192 -max-sram 2048 firmware.o
 range (× `iter`) when given, otherwise the whole file. `-max-flash` and
 `-max-sram` gate the whole-file flash footprint and static `.data`/`.bss` use.
 The budget result is also included in `-json` output under `"budgets"`.
+Budgets work alongside `-vs` too: they gate the target (new) file's cost while
+the diff is reported, so a comparison run still fails the build on exit `3`.
 
 A budget run still prints the full report, then a `== budget ==` summary:
 
@@ -300,10 +302,12 @@ cyclecount -mcu atmega328p -cpp -D F_CPU=16000000 blink.S
 cyclecount -mcu attiny3217 -cpp -I ./include firmware.S
 ```
 
-With `-mcu` set, `-cpp` passes `-mmcu=` so `<avr/io.h>` and register macros
-resolve to the right device. This covers the **C** preprocessor only — GNU-as
-`.macro`/`.include` are expanded by the assembler, not cpp, so for those keep
-analyzing a compiled `.o`/ELF.
+`-cpp` passes `-mmcu=` so `<avr/io.h>` and register macros resolve to the right
+device: the `-mcu` part when given, otherwise the default target's part
+(`attiny3217`) so the documented default still works. A bare `-core` (no
+specific device) passes no `-mmcu`. This covers the **C** preprocessor only —
+GNU-as `.macro`/`.include` are expanded by the assembler, not cpp, so for those
+keep analyzing a compiled `.o`/ELF.
 
 ### Input: source *or* compiled binary
 

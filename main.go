@@ -186,6 +186,10 @@ func main() {
 		rng = &m
 	}
 
+	// Budgets gate the target file's cost; evaluate them before the -vs return
+	// so a CI run that combines -vs with -max-* still fails on the exit status.
+	checks := evalBudgets(budgetsFromFlags(), res, rng)
+
 	if *flVS != "" {
 		blines, err := load(*flVS, *flObjdump)
 		if err != nil {
@@ -193,14 +197,17 @@ func main() {
 		}
 		bres := analyze.Analyze(blines, target)
 		if *flJSON {
-			emitCompareJSON(res, bres, path, *flVS)
+			emitCompareJSON(res, bres, path, *flVS, checks)
 		} else {
 			renderCompare(os.Stdout, res, bres, path, *flVS, *flClock)
+			renderBudgets(os.Stdout, checks)
+		}
+		if budgetsExceeded(checks) {
+			os.Exit(3)
 		}
 		return
 	}
 
-	checks := evalBudgets(budgetsFromFlags(), res, rng)
 	if *flJSON {
 		emitJSON(res, rng, path, checks)
 	} else {
@@ -212,11 +219,29 @@ func main() {
 	}
 }
 
+// defaultMCU is the part behind the default target (resolveTarget's ATtiny3217);
+// it is the -mmcu= passed to the preprocessor when neither -mcu nor -core is set,
+// so <avr/io.h> still resolves for the documented default.
+const defaultMCU = "attiny3217"
+
+// cppMCU picks the -mmcu= value for the preprocessor: the explicit -mcu when
+// given; otherwise the default target's part so device headers resolve. A bare
+// -core (no specific device) has no single right -mmcu, so none is passed.
+func cppMCU(mcu, core string) string {
+	if mcu != "" {
+		return strings.ToLower(mcu)
+	}
+	if core == "" {
+		return defaultMCU
+	}
+	return ""
+}
+
 // load reads a file, optionally running the C preprocessor first (-cpp).
 func load(path, objdumpBin string) ([]*asm.Line, error) {
 	if *flCPP {
 		return asm.LoadFileCPP(path, objdumpBin, asm.CPPOptions{
-			CC: *flCC, MMCU: *flMCU,
+			CC: *flCC, MMCU: cppMCU(*flMCU, *flCore),
 			Defines: flDefine, Includes: flInclude,
 		})
 	}
@@ -584,7 +609,7 @@ func emitJSON(res analyze.Result, rng *analyze.Metrics, path string, budgets []b
 	writeJSON(out)
 }
 
-func emitCompareJSON(neu, base analyze.Result, np, bp string) {
+func emitCompareJSON(neu, base analyze.Result, np, bp string, budgets []budgetCheck) {
 	out := struct {
 		New      string      `json:"new_file"`
 		Baseline string      `json:"baseline_file"`
@@ -598,8 +623,9 @@ func emitCompareJSON(neu, base analyze.Result, np, bp string) {
 			FlashBytes   int `json:"flash_bytes"`
 			SRAMStatic   int `json:"sram_static_bytes"`
 		} `json:"delta"`
+		Budgets []budgetCheck `json:"budgets,omitempty"`
 	}{New: np, Baseline: bp, Target: targetJSON(neu.Target),
-		NewM: toJSON(neu.File), BaseM: toJSON(base.File)}
+		NewM: toJSON(neu.File), BaseM: toJSON(base.File), Budgets: budgets}
 	out.Delta.Instructions = neu.File.InstrCount - base.File.InstrCount
 	out.Delta.CyclesMin = neu.File.CyclesMin - base.File.CyclesMin
 	out.Delta.CyclesMax = neu.File.CyclesMax - base.File.CyclesMax
