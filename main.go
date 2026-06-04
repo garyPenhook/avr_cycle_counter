@@ -35,13 +35,20 @@ var (
 	flFrom    = flag.String("from", "", "start label for an explicit range analysis")
 	flTo      = flag.String("to", "", "end label for an explicit range analysis")
 	flIter    = flag.Int("iter", 1, "loop trip count applied to the -from/-to range")
-	flVS      = flag.String("vs", "", "baseline .S file to diff the target against")
+	flVS      = flag.String("vs", "", "baseline file to diff the target against")
+	flObjdump = flag.String("objdump", "avr-objdump", "objdump binary used for ELF/.o/.hex input")
 )
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `cyclecount — AVR assembly cost analyzer
 
-usage: cyclecount [flags] <file.S>
+usage: cyclecount [flags] <file>
+
+Input is auto-detected:
+    .S/.s assembler source (incl. avr-gcc -S output), OR
+    a compiled ELF/.o, an Intel-HEX .hex, or saved 'avr-objdump -h -d' text —
+    these are disassembled (objdump binary set with -objdump) so macros,
+    .include, and the C preprocessor are already resolved.
 
 Select the target (default: ATtiny3217 / AVRxt):
     -mcu attiny3217        a known part number, or
@@ -64,6 +71,8 @@ examples:
     cyclecount -mcu atmega328p -v delay.S
     cyclecount -core avrrc -clock 8 delay.S
     cyclecount -mcu attiny3217 -vs baseline.S opt.S
+    cyclecount -mcu attiny3217 firmware.o      # analyze a compiled object
+    cyclecount -mcu atmega328p firmware.hex     # analyze an Intel-HEX image
 `)
 }
 
@@ -130,7 +139,7 @@ func main() {
 		fail(err)
 	}
 
-	lines, err := asm.ParseFile(path)
+	lines, err := asm.LoadFile(path, *flObjdump)
 	if err != nil {
 		fail(err)
 	}
@@ -149,7 +158,7 @@ func main() {
 	}
 
 	if *flVS != "" {
-		blines, err := asm.ParseFile(*flVS)
+		blines, err := asm.LoadFile(*flVS, *flObjdump)
 		if err != nil {
 			fail(err)
 		}

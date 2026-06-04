@@ -92,8 +92,34 @@ Flags **must precede** the file (Go's flag parser stops at the first operand):
 | `-v`         | per-instruction listing with word/cycle costs                 |
 | `-clock MHz` | also report wall-clock time (default `20`; `0` disables)      |
 | `-from L` / `-to L` / `-iter N` | analyze an explicit label range × N iterations |
-| `-vs FILE`   | diff the target file against a baseline `.S` (same core)      |
+| `-vs FILE`   | diff the target file against a baseline (same core)           |
 | `-json`      | machine-readable output                                       |
+| `-objdump P` | objdump binary for binary input (default `avr-objdump`)       |
+
+### Input: source *or* compiled binary
+
+The input file is auto-detected, so the same flags work either way:
+
+| input | how it's read |
+|-------|---------------|
+| `.S` / `.s` | parsed as GNU-assembler source (incl. `avr-gcc -S` output) |
+| ELF / `.o` | disassembled with `avr-objdump -h -d` |
+| `.hex` | disassembled with `avr-objdump -h -D -b ihex` |
+| saved `avr-objdump -h -d` text | parsed as disassembly directly |
+
+Analyzing the **compiled** object sidesteps the source parser's blind spots —
+macros, `.include`, and the C preprocessor are already resolved — and the
+objdump `-h` section table gives real `.data`/`.bss` sizes:
+
+```sh
+avr-gcc -mmcu=attiny3217 -O2 -c firmware.c -o firmware.o
+cyclecount -mcu attiny3217 firmware.o          # exact instruction stream
+cyclecount -mcu attiny3217 -from main -to loop firmware.o
+```
+
+Hot-path `@begin`/`@end` annotations are a source-mode feature (they live in
+comments the assembler strips); for binaries use `-from`/`-to` with the symbol
+names objdump prints, or analyze the whole file.
 
 ### Mark a hot path
 
@@ -143,7 +169,9 @@ cycle count is data/programming dependent, e.g. `SPM`), **⚠ unrecognised**.
   are bounds, not one executed path.
 - `LD`/`ST`/`LDD` addressing-mode timing on AVRxm and AVRrc is given as a range
   (the manual splits it by mode); AVRe and AVRxt are exact.
-- Macros and `.include` are not expanded; `#`-preprocessor lines are skipped.
+- In **source** mode, macros and `.include` are not expanded and
+  `#`-preprocessor lines are skipped — feed a compiled `.o`/ELF (which
+  `cyclecount` disassembles) when you need those resolved.
 - The device list is curated, not exhaustive — any unlisted AVR works via
   `-core` (and `-pc` for >128 KB parts).
 
@@ -154,6 +182,7 @@ main.go                  CLI, target selection, reports, JSON, comparison
 internal/isa/isa.go      per-core instruction timing + availability (DS40002198C)
 internal/isa/device.go   part-number → core / PC-width map
 internal/asm/asm.go      .S parser: lines, sections, data sizes, annotations
+internal/asm/objdump.go  binary front end: ELF/.o/.hex via avr-objdump
 internal/analyze/        instruction/cycle/flash/SRAM accounting per target
 examples/                delay.S, scale_mul.S, scale_shift.S
 ```
