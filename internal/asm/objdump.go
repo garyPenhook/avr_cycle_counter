@@ -65,6 +65,18 @@ func isDataSectionName(name string) bool {
 // looks like objdump output is parsed as disassembly; anything else is treated
 // as assembler source. objdumpBin defaults to "avr-objdump" when empty.
 func LoadFile(path, objdumpBin string) ([]*Line, error) {
+	return loadFile(path, objdumpBin, nil)
+}
+
+// LoadFileCPP behaves like LoadFile but, for assembler-source input, first runs
+// the C preprocessor (see Preprocess) so `#include`/`#define`/`#if` are
+// resolved before parsing. Binary/disassembly inputs ignore cpp (the
+// preprocessor does not apply to already-assembled code).
+func LoadFileCPP(path, objdumpBin string, cpp CPPOptions) ([]*Line, error) {
+	return loadFile(path, objdumpBin, &cpp)
+}
+
+func loadFile(path, objdumpBin string, cpp *CPPOptions) ([]*Line, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -86,6 +98,13 @@ func LoadFile(path, objdumpBin string) ([]*Line, error) {
 			return nil, err
 		}
 		return ParseObjdump(txt), nil
+	}
+	if cpp != nil {
+		txt, err := Preprocess(path, *cpp)
+		if err != nil {
+			return nil, err
+		}
+		return Parse(txt), nil
 	}
 	return Parse(s), nil
 }

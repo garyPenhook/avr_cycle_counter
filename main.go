@@ -37,7 +37,26 @@ var (
 	flIter    = flag.Int("iter", 1, "loop trip count applied to the -from/-to range")
 	flVS      = flag.String("vs", "", "baseline file to diff the target against")
 	flObjdump = flag.String("objdump", "avr-objdump", "objdump binary used for ELF/.o/.hex input")
+
+	flMaxCycles = flag.Int("max-cycles", 0, "fail (exit 3) if worst-case cycles exceed N (0 disables)")
+	flMaxFlash  = flag.Int("max-flash", 0, "fail (exit 3) if flash bytes exceed N (0 disables)")
+	flMaxSRAM   = flag.Int("max-sram", 0, "fail (exit 3) if static SRAM bytes exceed N (0 disables)")
+
+	flCPP = flag.Bool("cpp", false, "run the C preprocessor (#include/#define/#if) over .S/.s source before parsing")
+	flCC  = flag.String("cc", "avr-gcc", "compiler driver used for -cpp")
+
+	flDefine  multiFlag // -D NAME[=VAL], repeatable; passed to -cpp
+	flInclude multiFlag // -I DIR, repeatable; passed to -cpp
 )
+
+// multiFlag collects a repeatable string flag into a slice.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `cyclecount — AVR assembly cost analyzer
@@ -60,6 +79,12 @@ Mark a hot path inside the source with comment annotations:
     ...instructions...
     ; @end <name>
 
+Gate a build in CI with cost budgets (exit 3 when any limit is exceeded):
+    -max-cycles N   -max-flash N   -max-sram N
+
+Expand the C preprocessor on .S/.s source before parsing (#include/#define/#if):
+    -cpp [-cc avr-gcc] [-D NAME=VAL ...] [-I dir ...]
+
 flags:
 `)
 	flag.PrintDefaults()
@@ -73,6 +98,8 @@ examples:
     cyclecount -mcu attiny3217 -vs baseline.S opt.S
     cyclecount -mcu attiny3217 firmware.o      # analyze a compiled object
     cyclecount -mcu atmega328p firmware.hex     # analyze an Intel-HEX image
+    cyclecount -mcu attiny3217 -max-cycles 40 -from loop -to done hot.S
+    cyclecount -mcu atmega328p -cpp -D F_CPU=16000000 blink.S
 `)
 }
 
@@ -118,6 +145,8 @@ func pcBits(t analyze.Target) int {
 
 func main() {
 	flag.Usage = usage
+	flag.Var(&flDefine, "D", "preprocessor define NAME[=VAL] for -cpp (repeatable)")
+	flag.Var(&flInclude, "I", "preprocessor include directory for -cpp (repeatable)")
 	flag.Parse()
 	files := flag.Args()
 	if len(files) == 0 {
@@ -139,7 +168,7 @@ func main() {
 		fail(err)
 	}
 
-	lines, err := asm.LoadFile(path, *flObjdump)
+	lines, err := load(path, *flObjdump)
 	if err != nil {
 		fail(err)
 	}
@@ -157,25 +186,66 @@ func main() {
 		rng = &m
 	}
 
+	// Budgets gate the target file's cost; evaluate them before the -vs return
+	// so a CI run that combines -vs with -max-* still fails on the exit status.
+	checks := evalBudgets(budgetsFromFlags(), res, rng)
+
 	if *flVS != "" {
-		blines, err := asm.LoadFile(*flVS, *flObjdump)
+		blines, err := load(*flVS, *flObjdump)
 		if err != nil {
 			fail(err)
 		}
 		bres := analyze.Analyze(blines, target)
 		if *flJSON {
-			emitCompareJSON(res, bres, path, *flVS)
+			emitCompareJSON(res, bres, path, *flVS, checks)
 		} else {
 			renderCompare(os.Stdout, res, bres, path, *flVS, *flClock)
+			renderBudgets(os.Stdout, checks)
+		}
+		if budgetsExceeded(checks) {
+			os.Exit(3)
 		}
 		return
 	}
 
 	if *flJSON {
-		emitJSON(res, rng, path)
-		return
+		emitJSON(res, rng, path, checks)
+	} else {
+		renderReport(os.Stdout, res, rng, path, *flClock, *flVerbose)
+		renderBudgets(os.Stdout, checks)
 	}
-	renderReport(os.Stdout, res, rng, path, *flClock, *flVerbose)
+	if budgetsExceeded(checks) {
+		os.Exit(3)
+	}
+}
+
+// defaultMCU is the part behind the default target (resolveTarget's ATtiny3217);
+// it is the -mmcu= passed to the preprocessor when neither -mcu nor -core is set,
+// so <avr/io.h> still resolves for the documented default.
+const defaultMCU = "attiny3217"
+
+// cppMCU picks the -mmcu= value for the preprocessor: the explicit -mcu when
+// given; otherwise the default target's part so device headers resolve. A bare
+// -core (no specific device) has no single right -mmcu, so none is passed.
+func cppMCU(mcu, core string) string {
+	if mcu != "" {
+		return strings.ToLower(mcu)
+	}
+	if core == "" {
+		return defaultMCU
+	}
+	return ""
+}
+
+// load reads a file, optionally running the C preprocessor first (-cpp).
+func load(path, objdumpBin string) ([]*asm.Line, error) {
+	if *flCPP {
+		return asm.LoadFileCPP(path, objdumpBin, asm.CPPOptions{
+			CC: *flCC, MMCU: cppMCU(*flMCU, *flCore),
+			Defines: flDefine, Includes: flInclude,
+		})
+	}
+	return asm.LoadFile(path, objdumpBin)
 }
 
 // ---------------------------------------------------------------- rendering
@@ -346,6 +416,86 @@ func verdict(dCyc, dFlash, dSRAM int) string {
 	}, ", ") + "."
 }
 
+// ---------------------------------------------------------------- budgets
+
+// budgets are the CI gate limits; a zero field means "no limit".
+type budgets struct {
+	cycles, flash, sram int
+}
+
+func budgetsFromFlags() budgets {
+	return budgets{cycles: *flMaxCycles, flash: *flMaxFlash, sram: *flMaxSRAM}
+}
+
+func (b budgets) any() bool { return b.cycles > 0 || b.flash > 0 || b.sram > 0 }
+
+// budgetCheck is the outcome of one limit, ready for printing or JSON.
+type budgetCheck struct {
+	Name  string `json:"name"`
+	Limit int    `json:"limit"`
+	Got   int    `json:"got"`
+	Unit  string `json:"unit"`
+	Scope string `json:"scope"`
+	OK    bool   `json:"ok"`
+}
+
+// evalBudgets measures each set limit against the analysis. Cycles gate the
+// worst-case total of the primary span — the -from/-to range when present, else
+// the whole file; flash and SRAM gate the whole-file footprint.
+func evalBudgets(b budgets, res analyze.Result, rng *analyze.Metrics) []budgetCheck {
+	if !b.any() {
+		return nil
+	}
+	var out []budgetCheck
+	if b.cycles > 0 {
+		m, scope := res.File, "whole file"
+		if rng != nil {
+			m, scope = *rng, "range "+rng.Name
+		}
+		got := m.CyclesMax * max(m.Iter, 1)
+		out = append(out, budgetCheck{"cycles", b.cycles, got, "", scope, got <= b.cycles})
+	}
+	if b.flash > 0 {
+		got := res.File.FlashBytes()
+		out = append(out, budgetCheck{"flash", b.flash, got, " B", "whole file", got <= b.flash})
+	}
+	if b.sram > 0 {
+		got := res.SRAMStatic
+		out = append(out, budgetCheck{"sram", b.sram, got, " B", "static .data/.bss/.noinit", got <= b.sram})
+	}
+	return out
+}
+
+func budgetsExceeded(cs []budgetCheck) bool {
+	for _, c := range cs {
+		if !c.OK {
+			return true
+		}
+	}
+	return false
+}
+
+func renderBudgets(w io.Writer, cs []budgetCheck) {
+	if len(cs) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "== budget ==")
+	for _, c := range cs {
+		status := "OK"
+		if !c.OK {
+			status = "EXCEEDED"
+		}
+		fmt.Fprintf(w, "  %-8s : %d%s / %d%s limit — %s (%s)\n",
+			c.Name, c.Got, c.Unit, c.Limit, c.Unit, status, c.Scope)
+	}
+	if budgetsExceeded(cs) {
+		fmt.Fprintln(w, "  Verdict: budget exceeded (exit 3).")
+	} else {
+		fmt.Fprintln(w, "  Verdict: all within budget.")
+	}
+	fmt.Fprintln(w)
+}
+
 // ---------------------------------------------------------------- helpers
 
 func fmtTime(cycles int, mhz float64) string {
@@ -435,7 +585,7 @@ func targetJSON(t analyze.Target) any {
 	}{t.Name, t.Variant.String(), pcBits(t)}
 }
 
-func emitJSON(res analyze.Result, rng *analyze.Metrics, path string) {
+func emitJSON(res analyze.Result, rng *analyze.Metrics, path string, budgets []budgetCheck) {
 	out := struct {
 		File       string        `json:"file"`
 		Target     any           `json:"target"`
@@ -443,9 +593,11 @@ func emitJSON(res analyze.Result, rng *analyze.Metrics, path string) {
 		Regions    []jsonMetrics `json:"regions,omitempty"`
 		Range      *jsonMetrics  `json:"range,omitempty"`
 		SRAMStatic int           `json:"sram_static_bytes"`
+		Budgets    []budgetCheck `json:"budgets,omitempty"`
 	}{
 		File: path, Target: targetJSON(res.Target),
 		WholeFile: toJSON(res.File), SRAMStatic: res.SRAMStatic,
+		Budgets: budgets,
 	}
 	for _, r := range res.Regions {
 		out.Regions = append(out.Regions, toJSON(r))
@@ -457,7 +609,7 @@ func emitJSON(res analyze.Result, rng *analyze.Metrics, path string) {
 	writeJSON(out)
 }
 
-func emitCompareJSON(neu, base analyze.Result, np, bp string) {
+func emitCompareJSON(neu, base analyze.Result, np, bp string, budgets []budgetCheck) {
 	out := struct {
 		New      string      `json:"new_file"`
 		Baseline string      `json:"baseline_file"`
@@ -471,8 +623,9 @@ func emitCompareJSON(neu, base analyze.Result, np, bp string) {
 			FlashBytes   int `json:"flash_bytes"`
 			SRAMStatic   int `json:"sram_static_bytes"`
 		} `json:"delta"`
+		Budgets []budgetCheck `json:"budgets,omitempty"`
 	}{New: np, Baseline: bp, Target: targetJSON(neu.Target),
-		NewM: toJSON(neu.File), BaseM: toJSON(base.File)}
+		NewM: toJSON(neu.File), BaseM: toJSON(base.File), Budgets: budgets}
 	out.Delta.Instructions = neu.File.InstrCount - base.File.InstrCount
 	out.Delta.CyclesMin = neu.File.CyclesMin - base.File.CyclesMin
 	out.Delta.CyclesMax = neu.File.CyclesMax - base.File.CyclesMax
