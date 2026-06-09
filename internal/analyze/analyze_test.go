@@ -131,6 +131,24 @@ second:
 	}
 }
 
+func TestAnalyzeIgnoresNumericLocalLabelsAsTopLevelSymbols(t *testing.T) {
+	src := `first:
+	nop
+1:
+	dec r16
+	brne 1b
+second:
+	ret
+`
+	res := analyze.Analyze(asm.Parse(src), attiny3217)
+	if len(res.Symbols) != 2 {
+		t.Fatalf("symbols = %d, want 2", len(res.Symbols))
+	}
+	if res.Symbols[0].Name != "first" || res.Symbols[1].Name != "second" {
+		t.Fatalf("unexpected symbols: %+v", []string{res.Symbols[0].Name, res.Symbols[1].Name})
+	}
+}
+
 func TestSymbolMetricsStopsAtNextNonLocalLabel(t *testing.T) {
 	src := `first:
 	push r16
@@ -221,6 +239,41 @@ func TestBranchModeTakenFollowsForwardBranch(t *testing.T) {
 	brne taken
 	ret
 taken:
+	push r16
+	pop r16
+	ret
+`
+	m := analyze.AnalyzeMode(asm.Parse(src), attiny3217, analyze.BranchTaken).File
+	if m.InstrCount != 4 {
+		t.Fatalf("instructions = %d, want 4", m.InstrCount)
+	}
+	if m.CyclesMin != 9 || m.CyclesMax != 9 {
+		t.Fatalf("cycles = %d-%d, want 9", m.CyclesMin, m.CyclesMax)
+	}
+}
+
+func TestBranchModeTakenResolvesNumericLocalBackwardLabel(t *testing.T) {
+	src := `start:
+	ldi r16, 2
+1:
+	dec r16
+	brne 1b
+	ret
+`
+	m := analyze.AnalyzeMode(asm.Parse(src), attiny3217, analyze.BranchTaken).File
+	if m.InstrCount != 3 {
+		t.Fatalf("instructions = %d, want 3", m.InstrCount)
+	}
+	if m.CyclesMin != 4 || m.CyclesMax != 4 {
+		t.Fatalf("cycles = %d-%d, want 4", m.CyclesMin, m.CyclesMax)
+	}
+}
+
+func TestBranchModeTakenResolvesNumericLocalForwardLabel(t *testing.T) {
+	src := `start:
+	brne 1f
+	ret
+1:
 	push r16
 	pop r16
 	ret

@@ -194,6 +194,18 @@ func TestResolveTargetsRejectsMixedMatrix(t *testing.T) {
 	}
 }
 
+func TestResolveTargetsRejectsCPPMultiMCU(t *testing.T) {
+	oldMCU, oldCore, oldCPP := *flMCU, *flCore, *flCPP
+	t.Cleanup(func() {
+		*flMCU, *flCore, *flCPP = oldMCU, oldCore, oldCPP
+	})
+
+	*flMCU, *flCore, *flCPP = "attiny3217,atmega328p", "", true
+	if _, err := resolveTargets(); err == nil {
+		t.Fatal("expected -cpp multi-mcu error")
+	}
+}
+
 func TestValidateModeFlags(t *testing.T) {
 	oldVS, oldVerbose := *flVS, *flVerbose
 	oldCycles, oldFlash, oldSRAM := *flMaxCycles, *flMaxFlash, *flMaxSRAM

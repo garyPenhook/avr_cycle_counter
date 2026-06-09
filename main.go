@@ -239,6 +239,9 @@ func resolveTargets() ([]analyze.Target, error) {
 	if len(mcus) > 1 && len(cores) > 0 {
 		return nil, errors.New("comma-separated -mcu cannot be combined with -core; pick one target dimension")
 	}
+	if len(mcus) > 1 && *flCPP {
+		return nil, errors.New("-cpp cannot be combined with comma-separated -mcu; preprocess each target separately")
+	}
 	if len(cores) > 1 && len(mcus) > 0 {
 		return nil, errors.New("comma-separated -core cannot be combined with -mcu; pick one target dimension")
 	}

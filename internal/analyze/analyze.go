@@ -12,6 +12,7 @@ import (
 )
 
 var reObjdumpTarget = regexp.MustCompile(`<([^>]+)>`)
+var reNumericLocalRef = regexp.MustCompile(`^([0-9]+)([bf])$`)
 
 type BranchMode int
 
@@ -152,18 +153,54 @@ func prunesPath(mode BranchMode) bool {
 	return mode == BranchTaken || mode == BranchNotTaken
 }
 
+func targetOperand(operands string) string {
+	target, _, _ := strings.Cut(strings.TrimSpace(operands), ",")
+	return strings.TrimSpace(target)
+}
+
 func targetLabel(operands, comment string, valid map[string]int) string {
 	if m := reObjdumpTarget.FindStringSubmatch(comment); m != nil {
 		if _, ok := valid[m[1]]; ok {
 			return m[1]
 		}
 	}
-	target, _, _ := strings.Cut(strings.TrimSpace(operands), ",")
-	target = strings.TrimSpace(target)
+	target := targetOperand(operands)
 	if _, ok := valid[target]; ok {
 		return target
 	}
 	return ""
+}
+
+func resolveNumericLocalTarget(lines []*asm.Line, idx int, target string) int {
+	m := reNumericLocalRef.FindStringSubmatch(target)
+	if m == nil {
+		return -1
+	}
+	label, dir := m[1], m[2]
+	if dir == "b" {
+		for i := idx - 1; i >= 0; i-- {
+			if lines[i].Label == label {
+				return i
+			}
+		}
+		return -1
+	}
+	for i := idx + 1; i < len(lines); i++ {
+		if lines[i].Label == label {
+			return i
+		}
+	}
+	return -1
+}
+
+func targetIndex(lines []*asm.Line, idx int, operands, comment string, labelIndex map[string]int) (int, bool) {
+	if tgt := targetLabel(operands, comment, labelIndex); tgt != "" {
+		return labelIndex[tgt], true
+	}
+	if pos := resolveNumericLocalTarget(lines, idx, targetOperand(operands)); pos >= 0 {
+		return pos, true
+	}
+	return 0, false
 }
 
 func symbolSpans(lines []*asm.Line) map[string][]*asm.Line {
@@ -294,16 +331,18 @@ func executedLineSet(lines []*asm.Line, mode BranchMode) map[int]bool {
 		case ln.Mnemonic == "RET" || ln.Mnemonic == "RETI":
 			return out
 		case ln.Mnemonic == "RJMP" || ln.Mnemonic == "JMP":
-			if tgt := targetLabel(ln.Operands, ln.Comment, labelIndex); tgt != "" {
-				i = labelIndex[tgt]
+			if next, ok := targetIndex(lines, i, ln.Operands, ln.Comment, labelIndex); ok {
+				i = next
 				continue
 			}
+			return nil
 		case isCondBranch(ln.Mnemonic):
 			if mode == BranchTaken {
-				if tgt := targetLabel(ln.Operands, ln.Comment, labelIndex); tgt != "" {
-					i = labelIndex[tgt]
+				if next, ok := targetIndex(lines, i, ln.Operands, ln.Comment, labelIndex); ok {
+					i = next
 					continue
 				}
+				return nil
 			}
 		case isSkip(ln.Mnemonic):
 			if mode == BranchTaken {
@@ -475,7 +514,15 @@ func findLabel(lines []*asm.Line, label string) int {
 }
 
 func isLocalLabel(label string) bool {
-	return strings.HasPrefix(label, ".")
+	if strings.HasPrefix(label, ".") {
+		return true
+	}
+	for _, r := range label {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return label != ""
 }
 
 func nextSymbolBoundary(lines []*asm.Line, start int) int {
