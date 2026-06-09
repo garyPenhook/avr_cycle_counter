@@ -1,6 +1,9 @@
 # Built binary
 /cyclecount
 
+# Release/build output (manual cross-compiles and GoReleaser)
+/dist/
+
 # Go test/coverage artifacts
 *.out
 *.test
