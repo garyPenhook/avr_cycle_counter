@@ -398,13 +398,17 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		bres := analyze.Analyze(blines, run.Target)
+		// Analyze the baseline with the same conditional-branch policy as the new
+		// file so the diff is apples-to-apples; otherwise -branches worst on the
+		// new file would show a spurious Δ against a bounds-mode baseline.
+		mode, _ := analyze.ParseBranchMode(*flBranches)
+		bres := analyze.AnalyzeMode(blines, run.Target, mode)
 		if format == fmtJSON {
 			emitCompareJSON(run.Result, bres, path, *flVS, run.Budgets)
 		} else if format == fmtCSV {
-			renderCompareCSV(os.Stdout, run.Result, bres, path, *flVS)
+			renderCompareCSV(os.Stdout, run.Result, bres, path, *flVS, run.Budgets)
 		} else if format == fmtMD {
-			renderCompareMD(os.Stdout, run.Result, bres, path, *flVS, *flClock)
+			renderCompareMD(os.Stdout, run.Result, bres, path, *flVS, *flClock, run.Budgets)
 		} else if format == fmtGHA {
 			renderCompareGHA(os.Stdout, run.Result, bres, path, *flVS, run.Budgets, *flClock)
 		} else if format == fmtSARIF {
@@ -476,6 +480,9 @@ func validateSelectionFlags() error {
 	if *flIter < 1 {
 		return errors.New("-iter must be >= 1")
 	}
+	if *flClock < 0 {
+		return errors.New("-clock must be >= 0 (0 disables wall-clock time)")
+	}
 	if *flRank < 0 {
 		return errors.New("-rank must be >= 0")
 	}
@@ -517,6 +524,11 @@ func validateModeFlags(matrix bool, format outputFormat) error {
 	}
 	if *flVS != "" && *flRank > 0 {
 		return errors.New("-rank cannot be combined with -vs")
+	}
+	// The comparison renderers diff whole-file metrics only; a narrowed scope
+	// would silently apply to budgets but not the diff, so reject the mix.
+	if *flVS != "" && (selectedSymbol() != "" || *flFrom != "" || *flTo != "") {
+		return errors.New("-vs compares whole files; it cannot be combined with -symbol/-func or -from/-to")
 	}
 	return nil
 }
@@ -838,7 +850,7 @@ func renderMatrixCSV(w io.Writer, runs []analysisRun, path string) {
 	cw.Flush()
 }
 
-func renderCompareCSV(w io.Writer, neu, base analyze.Result, np, bp string) {
+func renderCompareCSV(w io.Writer, neu, base analyze.Result, np, bp string, budgets []budgetCheck) {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"metric", "baseline_file", "baseline", "new_file", "new", "delta"})
 	write := func(metric string, b, n int) {
@@ -850,6 +862,11 @@ func renderCompareCSV(w io.Writer, neu, base analyze.Result, np, bp string) {
 	write("flash_bytes", base.File.FlashBytes(), neu.File.FlashBytes())
 	write("sram_static_bytes", base.SRAMStatic, neu.SRAMStatic)
 	write("peak_stack_bytes", base.File.PeakStackBytes, neu.File.PeakStackBytes)
+	// Budget rows reuse the columns: "baseline" carries the limit, "new" the
+	// measured value, so a positive delta means the limit was exceeded.
+	for _, bgt := range budgets {
+		write("budget:"+bgt.Name, bgt.Limit, bgt.Got)
+	}
 	cw.Flush()
 }
 
@@ -898,7 +915,7 @@ func renderMatrixMD(w io.Writer, runs []analysisRun, path string, clock float64)
 	}
 }
 
-func renderCompareMD(w io.Writer, neu, base analyze.Result, np, bp string, clock float64) {
+func renderCompareMD(w io.Writer, neu, base analyze.Result, np, bp string, clock float64, budgets []budgetCheck) {
 	fmt.Fprintf(w, "# AVR Comparison\n\n- New: `%s`\n- Baseline: `%s`\n", np, bp)
 	if clock > 0 {
 		fmt.Fprintf(w, "- Clock: `%g MHz`\n", clock)
@@ -914,6 +931,14 @@ func renderCompareMD(w io.Writer, neu, base analyze.Result, np, bp string, clock
 	row("flash bytes", base.File.FlashBytes(), neu.File.FlashBytes(), "")
 	row("static SRAM", base.SRAMStatic, neu.SRAMStatic, "")
 	row("peak stack", base.File.PeakStackBytes, neu.File.PeakStackBytes, "")
+	if len(budgets) > 0 {
+		fmt.Fprintln(w, "\n## Budgets")
+		fmt.Fprintln(w, "| Name | Got | Limit | Scope | OK |")
+		fmt.Fprintln(w, "| --- | ---: | ---: | --- | --- |")
+		for _, b := range budgets {
+			fmt.Fprintf(w, "| %s | %d%s | %d%s | %s | %t |\n", b.Name, b.Got, b.Unit, b.Limit, b.Unit, b.Scope, b.OK)
+		}
+	}
 }
 
 func renderSingleGHA(w io.Writer, run analysisRun, path string, clock float64) {
@@ -938,7 +963,7 @@ func renderMatrixGHA(w io.Writer, runs []analysisRun, path string, clock float64
 
 func renderCompareGHA(w io.Writer, neu, base analyze.Result, np, bp string, budgets []budgetCheck, clock float64) {
 	fmt.Fprintln(w, "::group::cyclecount comparison")
-	renderCompareMD(w, neu, base, np, bp, clock)
+	renderCompareMD(w, neu, base, np, bp, clock, budgets)
 	fmt.Fprintln(w, "::endgroup::")
 	for _, b := range budgets {
 		if !b.OK {

@@ -119,7 +119,9 @@ func isDataSection(sec string) bool {
 }
 
 func isCondBranch(mn string) bool {
-	return strings.HasPrefix(mn, "BR")
+	// All AVR conditional branches are BRxx; BREAK shares the prefix but is not
+	// a branch, so exclude it explicitly.
+	return strings.HasPrefix(mn, "BR") && mn != "BREAK"
 }
 
 func isSkip(mn string) bool {
@@ -190,9 +192,14 @@ type stackPeak struct {
 	total int
 }
 
-func stackPeaks(name string, lines []*asm.Line, t Target, symbols map[string][]*asm.Line, cache map[string]stackPeak, visiting map[string]bool) stackPeak {
+// stackPeaks measures the deepest stack use of a span. executed, when non-nil,
+// restricts the walk to lines on the selected branch path (taken/not-taken
+// pruning) and applies only to this top frame — callees execute in full, so
+// recursive calls pass nil. A pruned frame is path-specific, so it bypasses the
+// shared cache to avoid contaminating an unpruned caller's result.
+func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool, symbols map[string][]*asm.Line, cache map[string]stackPeak, visiting map[string]bool) stackPeak {
 	if name != "" {
-		if sp, ok := cache[name]; ok {
+		if sp, ok := cache[name]; ok && executed == nil {
 			return sp
 		}
 		if visiting[name] {
@@ -203,8 +210,11 @@ func stackPeaks(name string, lines []*asm.Line, t Target, symbols map[string][]*
 	}
 
 	runningPush, peakPush, peakTotal := 0, 0, 0
-	for _, ln := range lines {
+	for idx, ln := range lines {
 		if ln.Mnemonic == "" {
+			continue
+		}
+		if executed != nil && !executed[idx] {
 			continue
 		}
 		info, ok := isa.Lookup(ln.Mnemonic)
@@ -229,7 +239,7 @@ func stackPeaks(name string, lines []*asm.Line, t Target, symbols map[string][]*
 			total := runningPush + t.PCBytes
 			if tgt := callTarget(ln, symbols); tgt != "" {
 				if callee, ok := symbols[tgt]; ok {
-					total += stackPeaks(tgt, callee, t, symbols, cache, visiting).total
+					total += stackPeaks(tgt, callee, t, nil, symbols, cache, visiting).total
 				}
 			}
 			if total > peakTotal {
@@ -394,7 +404,7 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 	if _, ok := symbols[name]; ok {
 		seed = name
 	}
-	sp := stackPeaks(seed, lines, t, symbols, map[string]stackPeak{}, map[string]bool{})
+	sp := stackPeaks(seed, lines, t, executed, symbols, map[string]stackPeak{}, map[string]bool{})
 	m.PeakPushBytes = sp.push
 	m.PeakCallBytes = sp.call
 	m.PeakStackBytes = sp.total

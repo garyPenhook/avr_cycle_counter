@@ -254,6 +254,30 @@ done:
 	}
 }
 
+// In not-taken mode the pushes on the unreachable (taken) path must not count
+// toward peak stack, matching the pruned instruction/cycle accounting.
+func TestStackPeakRespectsBranchPruning(t *testing.T) {
+	src := `start:
+	brne heavy
+	ret
+heavy:
+	push r16
+	push r17
+	pop r17
+	pop r16
+	ret
+`
+	lines := asm.Parse(src)
+	bounds := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchBounds).File
+	if bounds.PeakStackBytes != 2 {
+		t.Fatalf("bounds peak stack = %d, want 2", bounds.PeakStackBytes)
+	}
+	notTaken := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchNotTaken).File
+	if notTaken.PeakStackBytes != 0 {
+		t.Fatalf("not-taken peak stack = %d, want 0 (heavy path pruned)", notTaken.PeakStackBytes)
+	}
+}
+
 func TestCallSiteAddsReturnAddressToPeakStack(t *testing.T) {
 	src := `f:
 	push r16

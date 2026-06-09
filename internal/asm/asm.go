@@ -295,14 +295,15 @@ func firstInt(s string) (int, bool) {
 		s = s[:j]
 	}
 	v, err := strconv.ParseInt(s, 0, 64)
-	if err != nil {
-		return 0, false
+	if err != nil || v < 0 {
+		return 0, false // negative reservations don't allocate storage we can size
 	}
 	return int(v), true
 }
 
-// stringBytes sums the lengths of quoted strings in a; escapes count as 1 byte
-// (an approximation for \x.. / octal). terminated adds a NUL per string.
+// stringBytes sums the lengths of quoted strings in a; each escape sequence
+// (\n, \\, \xHH, \NNN octal) counts as one byte. terminated adds a NUL per
+// string (.asciz/.string).
 func stringBytes(a string, terminated bool) (int, bool) {
 	total, count, i := 0, 0, 0
 	for i < len(a) {
@@ -314,7 +315,7 @@ func stringBytes(a string, terminated bool) (int, bool) {
 		n := 0
 		for i < len(a) && a[i] != '"' {
 			if a[i] == '\\' && i+1 < len(a) {
-				i += 2
+				i += escapeLen(a[i+1:])
 			} else {
 				i++
 			}
@@ -331,4 +332,33 @@ func stringBytes(a string, terminated bool) (int, bool) {
 		return 0, false
 	}
 	return total, true
+}
+
+// escapeLen returns the total input span of an escape sequence, including the
+// leading backslash; rest is the text right after that backslash. One escape
+// encodes one output byte.
+//   - \xHH..: 'x' plus all following hex digits
+//   - \NNN:   up to three octal digits
+//   - \c:     any other single character
+func escapeLen(rest string) int {
+	switch {
+	case rest[0] == 'x' || rest[0] == 'X':
+		n := 1
+		for n < len(rest) && isHexDigit(rest[n]) {
+			n++
+		}
+		return 1 + n // backslash + 'x' + hex digits
+	case rest[0] >= '0' && rest[0] <= '7':
+		n := 0
+		for n < len(rest) && n < 3 && rest[n] >= '0' && rest[n] <= '7' {
+			n++
+		}
+		return 1 + n // backslash + octal digits
+	default:
+		return 2 // backslash + one char
+	}
+}
+
+func isHexDigit(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
