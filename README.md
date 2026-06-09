@@ -34,6 +34,7 @@ Pick a target three ways (default is **ATtiny3217 / AVRxt**):
 cyclecount -mcu atmega328p   file.S   # a known part number
 cyclecount -core avrrc       file.S   # a CPU variant directly — works for ANY AVR
 cyclecount -core avre+ -pc 3 file.S   # 22-bit PC override for >128 KB parts
+cyclecount -mcu attiny3217,atmega328p file.S   # compare multiple MCUs in one run
 ```
 
 The same source, three cores — note the cycle count and instruction set both
@@ -47,6 +48,12 @@ ATtiny10   (AVRrc) : 19 – 20 cycles   + ✘ SBIW: not implemented on AVRrc
 
 If a part isn't in the built-in device list, `cyclecount` tells you to use
 `-core` directly — so no AVR is left out.
+
+The lookup is no longer exact-name only: besides curated entries, `cyclecount`
+also recognizes several common family naming patterns such as modern `AVR128DA*`
+/ `AVR64EA*`, many classic `ATmega*` suffix variants, and broad `ATxmega*`
+families, so routine package/suffix variants resolve without adding every exact
+part string by hand.
 
 ## Cycle data provenance
 
@@ -161,10 +168,17 @@ cyclecount -mcu atmega328p -v examples/delay.S
 # 4. focus on a hot loop and give its trip count
 cyclecount -from .L_inner -to .L_inner -iter 1000 examples/delay.S
 
-# 5. prove an optimisation against a baseline
+# 5. analyze one function/symbol directly
+cyclecount -func delay_ticks examples/delay.S
+cyclecount -mcu attiny3217 -symbol toggle_pin firmware.o
+
+# 6. compare the same code across multiple targets
+cyclecount -mcu attiny3217,atmega328p,attiny10 examples/delay.S
+
+# 7. prove an optimisation against a baseline
 cyclecount -vs examples/scale_mul.S examples/scale_shift.S
 
-# 6. gate it in CI — non-zero exit if the loop blows its cycle budget
+# 8. gate it in CI — non-zero exit if the loop blows its cycle budget
 cyclecount -from loop -to done -max-cycles 40 hot.S
 ```
 
@@ -177,9 +191,13 @@ The full set (all optional; sensible defaults shown in parentheses):
 | `-mcu P`     | target part number (e.g. `attiny3217`, `atmega328p`, `avr128da48`) |
 | `-core V`    | CPU variant directly: `avr`, `avre`, `avre+`, `avrxm`, `avrxt`, `avrrc` |
 | `-pc N`      | program-counter width in bytes: `2` (16-bit) or `3` (22-bit)  |
+| `-format F`  | output format: `text`, `json`, `csv`, `md`, `gha`, `sarif`     |
 | `-v`         | per-instruction listing with word/cycle costs                 |
 | `-clock MHz` | also report wall-clock time (default `20`; `0` disables)      |
 | `-from L` / `-to L` / `-iter N` | analyze an explicit label range × N iterations |
+| `-branches M` | conditional timing mode: `bounds`, `best`, `worst`, `taken`, `not-taken` |
+| `-rank N` / `-rank-by M` | rank top `N` symbol/region spans by `cycles`, `flash`, or `stack` |
+| `-symbol L` / `-func L` | analyze one symbol/function from its label to the next non-local symbol |
 | `-vs FILE`   | diff the target file against a baseline (same core)           |
 | `-json`      | machine-readable output                                       |
 | `-objdump P` | objdump binary for binary input (default `avr-objdump`)       |
@@ -187,6 +205,32 @@ The full set (all optional; sensible defaults shown in parentheses):
 | `-cpp`       | run the C preprocessor over `.S`/`.s` source before parsing   |
 | `-cc P`      | compiler driver used for `-cpp` (default `avr-gcc`)           |
 | `-D NAME=VAL` / `-I DIR` | preprocessor define / include dir for `-cpp` (repeatable) |
+
+`-mcu` and `-core` also accept comma-separated lists for a multi-target
+comparison run, for example `-mcu attiny3217,atmega328p,attiny10` or
+`-core avre+,avrxt,avrrc`. In that mode the same file/span is analyzed once per
+target and printed as a comparison matrix. Multi-target mode does not combine
+with `-vs`, `-v`, or `-max-*` budgets.
+
+`-format` defaults to `text`. `json` matches the existing machine-readable
+object mode (and `-json` remains as a compatibility alias). `csv` emits flat
+rows for spreadsheets or CI parsing, `md` emits Markdown tables, and `gha`
+emits GitHub Actions group/error annotations around a Markdown summary.
+`sarif` emits SARIF 2.1.0 findings for code-scanning style consumers.
+Non-text formats do not support `-v`.
+
+`-branches` defaults to `bounds`, which preserves the existing min/max report.
+`best` and `worst` force each conditional branch/skip to its cheaper or more
+expensive timing; `taken` and `not-taken` force the taken/fallthrough timing of
+conditional instructions. `taken` / `not-taken` now also follow direct,
+resolvable branches/jumps and stop on `RET` or a repeated instruction; `best`
+and `worst` still constrain **timing only** and do not prune the span with a
+full CFG walk.
+
+`-rank N` surfaces the top `N` costly top-level symbol spans and annotated
+regions in the current file. `-rank-by cycles` sorts by worst-case cycle total,
+`flash` by flash bytes, and `stack` by peak stack bytes. Ranking is single-file,
+single-target only, and does not combine with `-vs`.
 
 ### Reading the report
 
@@ -205,7 +249,7 @@ Clock: 20 MHz.                                    ← from -clock (omit with -cl
   Flash          : 18 bytes (9 words)            ← code (+ inline flash data, if any)
   Cycles/pass    : 17 – 18  (min–max)            ← honest bounds; branches vary
   Time @20MHz    : 850.0 ns – 900.0 ns           ← cycles ÷ clock
-  Stack (SRAM)   : peak 1 B (1 PUSH / 1 POP)     ← peak push depth + call frames
+  Stack (SRAM)   : peak 1 B (1 PUSH / 1 POP)     ← local push depth; call sites add return-address bytes
 
 == inner ==                                      ← an @begin/@end annotated region
   Instructions   : 2
@@ -241,6 +285,11 @@ Instructions are classified per target and flagged when they need attention:
 **● not modeled** (recognised, but the cycle count is data/programming
 dependent, e.g. `SPM`), **⚠ unrecognised** (not in the ISA table — check syntax).
 
+If you select `-branches best|worst|taken|not-taken`, the report header records
+that mode. `best` / `worst` change only conditional timing. `taken` /
+`not-taken` also prune the executed path for direct resolvable branches/jumps,
+but they still are not a full control-flow-graph proof.
+
 ### Exit codes
 
 `cyclecount` uses its exit status so scripts and CI can branch on it:
@@ -264,8 +313,9 @@ cyclecount -mcu attiny3217 -from loop -to done -max-cycles 40 hot.S
 cyclecount -mcu atmega328p -max-flash 8192 -max-sram 2048 firmware.o
 ```
 
-`-max-cycles` gates the worst-case total of the primary span — the `-from`/`-to`
-range (× `iter`) when given, otherwise the whole file. `-max-flash` and
+`-max-cycles` gates the worst-case total of the primary span — `-symbol` /
+`-func` when given, else the `-from`/`-to` range (× `iter`) when given,
+otherwise the whole file. `-max-flash` and
 `-max-sram` gate the whole-file flash footprint and static `.data`/`.bss` use.
 The budget result is also included in `-json` output under `"budgets"`.
 Budgets work alongside `-vs` too: they gate the target (new) file's cost while
@@ -327,12 +377,17 @@ objdump `-h` section table gives real `.data`/`.bss` sizes:
 ```sh
 avr-gcc -mmcu=attiny3217 -O2 -c firmware.c -o firmware.o
 cyclecount -mcu attiny3217 firmware.o          # exact instruction stream
+cyclecount -mcu attiny3217 -func toggle_pin firmware.o
 cyclecount -mcu attiny3217 -from main -to loop firmware.o
 ```
 
 Hot-path `@begin`/`@end` annotations are a source-mode feature (they live in
 comments the assembler strips); for binaries use `-from`/`-to` with the symbol
 names objdump prints, or analyze the whole file.
+
+`-symbol` / `-func` selects the span that starts at the named label and ends at
+the next non-local symbol (or EOF). That matches objdump function symbols and
+typical top-level source labels while ignoring interior `.L...` labels.
 
 ### Mark a hot path
 
@@ -359,14 +414,27 @@ $ cyclecount -vs examples/scale_mul.S examples/scale_shift.S
   Verdict: costs 1 more cycles (worst case), costs 4 more flash bytes, same SRAM bytes.
 ```
 
+### Compare multiple targets in one run
+
+```sh
+cyclecount -mcu attiny3217,atmega328p,attiny10 examples/delay.S
+cyclecount -core avre+,avrxt,avrrc -func delay_ticks firmware.o
+```
+
+This prints one row per target for the selected scope (whole file, `-from`/`-to`
+range, or `-symbol` / `-func` span), so timing and availability differences are
+visible side by side.
+
 ### Machine-readable output (`-json`)
 
 `-json` prints the same numbers as a single JSON object instead of text — for
 dashboards, regression tracking, or piping into `jq`. It carries the resolved
 `target`, the `whole_file` metrics, any annotated `regions`, an optional
-`range` (with `-from`/`-to`), `sram_static_bytes`, and a `budgets` array when
+`range` (with `-from`/`-to`), an optional `symbol` (with `-symbol` / `-func`),
+`sram_static_bytes`, and a `budgets` array when
 limits are set. With `-vs` it emits a comparison object (`new`, `baseline`,
-`delta`) instead.
+`delta`) instead. In multi-target mode it emits a `"mode": "multi-target"`
+object with one entry per target.
 
 ```sh
 cyclecount -json -mcu atmega328p firmware.o | jq '.whole_file.cycles_max'
@@ -394,6 +462,39 @@ cyclecount -json -mcu atmega328p firmware.o | jq '.whole_file.cycles_max'
 When a budget is exceeded the JSON is still printed in full (with `"ok": false`)
 and the process exits `3`, so CI sees both the data and the failure.
 
+### Other output formats
+
+```sh
+cyclecount -format csv firmware.o
+cyclecount -format md -func toggle_pin firmware.o
+cyclecount -format gha -max-cycles 40 hot.S
+cyclecount -format sarif -max-cycles 40 hot.S
+cyclecount -rank 5 -rank-by cycles firmware.o
+```
+
+- `csv` is flat and script-friendly: single-target runs emit one row per
+  whole-file/region/range/symbol span; comparisons and multi-target runs emit
+  one row per metric or target.
+- `md` emits Markdown headings and tables suitable for issue comments, docs, or
+  pasted benchmark notes.
+- `gha` wraps the Markdown summary in GitHub Actions log groups and emits
+  `::error` annotations for exceeded budgets.
+- `sarif` emits findings for exceeded budgets plus unavailable, unmodeled, and
+  unknown instructions with target/scope metadata. It is aimed at code scanning
+  and machine ingestion rather than full metric presentation.
+
+### Rank costly spans
+
+```sh
+cyclecount -rank 5 firmware.o
+cyclecount -rank 10 -rank-by flash examples/delay.S
+cyclecount -rank 5 -rank-by stack firmware.o
+```
+
+Ranking walks top-level symbol spans plus any annotated `@begin`/`@end` regions
+already present in the file and reports the costliest entries by the selected
+metric.
+
 ## What it measures
 
 - **Instructions** valid for the selected core (whole file, each annotated
@@ -403,8 +504,9 @@ and the process exits `3`, so CI sees both the data and the failure.
 - **Flash**: instruction words × 2 (per-core; `LDS`/`STS` are 1 word on the
   Reduced Core) plus inline data in a flash section.
 - **SRAM (static)**: `.data`/`.bss`/`.noinit` allocations.
-- **SRAM (stack)**: peak `PUSH` depth and call return-address bytes (2 or 3,
-  per PC width).
+- **SRAM (stack)**: peak local `PUSH` depth, plus return-address/callee stack
+  bytes at the deepest direct intra-file call site (2 or 3 return-address
+  bytes, per PC width).
 
 Each instruction is also classified per target (`✘` unavailable, `●` not
 modeled, `⚠` unrecognised) — see [Reading the report](#reading-the-report).
@@ -413,7 +515,14 @@ modeled, `⚠` unrecognised) — see [Reading the report](#reading-the-report).
 
 - It is a listing analyser, not a simulator: it does not follow calls or
   branches, so loop totals come from your `iter=` annotation and cycle ranges
-  are bounds, not one executed path.
+  are bounds, not one executed path. `-branches taken|not-taken` can now follow
+  direct resolvable branches/jumps and stop at `RET` or a repeated instruction,
+  but this is still a bounded path-pruning heuristic rather than full CFG
+  traversal.
+- Call-stack reporting now follows direct intra-file calls into known top-level
+  symbols, so a caller can include callee-local stack depth. It still does not
+  compute a full interprocedural worst-case over arbitrary call graphs, and
+  recursion/cycles are truncated rather than expanded indefinitely.
 - `LD`/`ST`/`LDD` addressing-mode timing on AVRxm and AVRrc is given as a range
   (the manual splits it by mode); AVRe and AVRxt are exact.
 - In **source** mode, the C preprocessor is applied only with `-cpp`; GNU-as

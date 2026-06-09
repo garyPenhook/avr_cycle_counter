@@ -91,8 +91,9 @@ func TestRegionIterAndStack(t *testing.T) {
 	if r.CyclesMin != 4 || r.CyclesMax != 4 { // push 1 + dec 1 + pop 2
 		t.Errorf("cycles/pass = %d–%d, want 4", r.CyclesMin, r.CyclesMax)
 	}
-	if r.PeakStackBytes != 1 || r.Pushes != 1 || r.Pops != 1 {
-		t.Errorf("stack: peak=%d push=%d pop=%d, want 1/1/1", r.PeakStackBytes, r.Pushes, r.Pops)
+	if r.PeakStackBytes != 1 || r.PeakPushBytes != 1 || r.PeakCallBytes != 0 || r.Pushes != 1 || r.Pops != 1 {
+		t.Errorf("stack: peak=%d pushpeak=%d callpeak=%d push=%d pop=%d, want 1/1/0/1/1",
+			r.PeakStackBytes, r.PeakPushBytes, r.PeakCallBytes, r.Pushes, r.Pops)
 	}
 }
 
@@ -110,17 +111,246 @@ tab:	.word 1, 2, 3
 	}
 }
 
+func TestAnalyzeExtractsTopLevelSymbols(t *testing.T) {
+	src := `first:
+	nop
+	ret
+.L_inner:
+	nop
+second:
+	push r16
+	pop r16
+	ret
+`
+	res := analyze.Analyze(asm.Parse(src), attiny3217)
+	if len(res.Symbols) != 2 {
+		t.Fatalf("symbols = %d, want 2", len(res.Symbols))
+	}
+	if res.Symbols[0].Name != "first" || res.Symbols[1].Name != "second" {
+		t.Fatalf("unexpected symbols: %+v", []string{res.Symbols[0].Name, res.Symbols[1].Name})
+	}
+}
+
+func TestSymbolMetricsStopsAtNextNonLocalLabel(t *testing.T) {
+	src := `first:
+	push r16
+.L_loop:
+	dec r16
+	brne .L_loop
+second:
+	ret
+`
+	m, err := analyze.SymbolMetrics(asm.Parse(src), "first", 1, attiny3217)
+	if err != nil {
+		t.Fatalf("SymbolMetrics: %v", err)
+	}
+	if m.InstrCount != 3 {
+		t.Fatalf("instructions = %d, want 3", m.InstrCount)
+	}
+	if _, ok := m.Hist["RET"]; ok {
+		t.Fatal("symbol span should stop before next non-local label")
+	}
+}
+
+func TestSymbolMetricsIncludesToEOFWhenLastSymbol(t *testing.T) {
+	src := `delay_ticks:
+	sbiw r24, 1
+	brne delay_ticks
+	ret
+`
+	m, err := analyze.SymbolMetrics(asm.Parse(src), "delay_ticks", 10, attiny3217)
+	if err != nil {
+		t.Fatalf("SymbolMetrics: %v", err)
+	}
+	if m.Iter != 10 {
+		t.Fatalf("iter = %d, want 10", m.Iter)
+	}
+	if m.InstrCount != 3 {
+		t.Fatalf("instructions = %d, want 3", m.InstrCount)
+	}
+}
+
+func TestBranchModeConditionalBranch(t *testing.T) {
+	src := `loop:
+	brne loop
+	ret
+`
+	lines := asm.Parse(src)
+
+	best := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchBest).File
+	if best.CyclesMin != 5 || best.CyclesMax != 5 {
+		t.Fatalf("best = %d-%d, want 5", best.CyclesMin, best.CyclesMax)
+	}
+
+	worst := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchWorst).File
+	if worst.CyclesMin != 6 || worst.CyclesMax != 6 {
+		t.Fatalf("worst = %d-%d, want 6", worst.CyclesMin, worst.CyclesMax)
+	}
+
+	taken := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchTaken).File
+	if taken.CyclesMin != 2 || taken.CyclesMax != 2 {
+		t.Fatalf("taken = %d-%d, want 2", taken.CyclesMin, taken.CyclesMax)
+	}
+
+	notTaken := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchNotTaken).File
+	if notTaken.CyclesMin != 5 || notTaken.CyclesMax != 5 {
+		t.Fatalf("not-taken = %d-%d, want 5", notTaken.CyclesMin, notTaken.CyclesMax)
+	}
+}
+
+func TestBranchModeNotTakenPrunesUnreachableTail(t *testing.T) {
+	src := `start:
+	brne skip
+	ret
+skip:
+	push r16
+	pop r16
+	ret
+`
+	m := analyze.AnalyzeMode(asm.Parse(src), attiny3217, analyze.BranchNotTaken).File
+	if m.InstrCount != 2 {
+		t.Fatalf("instructions = %d, want 2", m.InstrCount)
+	}
+	if m.CyclesMin != 5 || m.CyclesMax != 5 {
+		t.Fatalf("cycles = %d-%d, want 5", m.CyclesMin, m.CyclesMax)
+	}
+}
+
+func TestBranchModeTakenFollowsForwardBranch(t *testing.T) {
+	src := `start:
+	brne taken
+	ret
+taken:
+	push r16
+	pop r16
+	ret
+`
+	m := analyze.AnalyzeMode(asm.Parse(src), attiny3217, analyze.BranchTaken).File
+	if m.InstrCount != 4 {
+		t.Fatalf("instructions = %d, want 4", m.InstrCount)
+	}
+	if m.CyclesMin != 9 || m.CyclesMax != 9 {
+		t.Fatalf("cycles = %d-%d, want 9", m.CyclesMin, m.CyclesMax)
+	}
+}
+
+func TestBranchModeSkipInstructionUsesNextWordSize(t *testing.T) {
+	src := `start:
+	cpse r16, r17
+	jmp done
+done:
+	ret
+`
+	lines := asm.Parse(src)
+
+	taken := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchTaken).File
+	if taken.CyclesMin != 7 || taken.CyclesMax != 7 {
+		t.Fatalf("taken = %d-%d, want 7", taken.CyclesMin, taken.CyclesMax)
+	}
+
+	notTaken := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchNotTaken).File
+	if notTaken.CyclesMin != 8 || notTaken.CyclesMax != 8 {
+		t.Fatalf("not-taken = %d-%d, want 8", notTaken.CyclesMin, notTaken.CyclesMax)
+	}
+}
+
+func TestCallSiteAddsReturnAddressToPeakStack(t *testing.T) {
+	src := `f:
+	push r16
+	call g
+	pop r16
+	ret
+g:
+	ret
+`
+	m := analyze.Analyze(asm.Parse(src), attiny3217).File
+	if m.PeakPushBytes != 1 {
+		t.Fatalf("peak push = %d, want 1", m.PeakPushBytes)
+	}
+	if m.PeakCallBytes != 2 {
+		t.Fatalf("peak call bytes = %d, want 2", m.PeakCallBytes)
+	}
+	if m.PeakStackBytes != 3 {
+		t.Fatalf("peak stack = %d, want 3", m.PeakStackBytes)
+	}
+}
+
+func TestCallSiteUsesPCWidthForReturnAddressPeak(t *testing.T) {
+	src := `f:
+	push r16
+	call g
+	pop r16
+	ret
+g:
+	ret
+`
+	pc22 := analyze.Analyze(asm.Parse(src),
+		analyze.Target{Variant: isa.VarAVRePlus, PCBytes: 3}).File
+	if pc22.PeakCallBytes != 3 {
+		t.Fatalf("peak call bytes = %d, want 3", pc22.PeakCallBytes)
+	}
+	if pc22.PeakStackBytes != 4 {
+		t.Fatalf("peak stack = %d, want 4", pc22.PeakStackBytes)
+	}
+}
+
+func TestDirectCallIncludesCalleeLocalStack(t *testing.T) {
+	src := `f:
+	push r16
+	call g
+	pop r16
+	ret
+g:
+	push r17
+	push r18
+	pop r18
+	pop r17
+	ret
+`
+	m := analyze.Analyze(asm.Parse(src), attiny3217).File
+	if m.PeakPushBytes != 2 {
+		t.Fatalf("peak push = %d, want 2", m.PeakPushBytes)
+	}
+	if m.PeakCallBytes != 3 {
+		t.Fatalf("peak call bytes = %d, want 3", m.PeakCallBytes)
+	}
+	if m.PeakStackBytes != 5 {
+		t.Fatalf("peak stack = %d, want 5", m.PeakStackBytes)
+	}
+}
+
+func TestRecursiveCallDoesNotLoopForever(t *testing.T) {
+	src := `f:
+	push r16
+	call f
+	pop r16
+	ret
+`
+	m, err := analyze.SymbolMetrics(asm.Parse(src), "f", 1, attiny3217)
+	if err != nil {
+		t.Fatalf("SymbolMetrics: %v", err)
+	}
+	if m.PeakStackBytes != 3 {
+		t.Fatalf("peak stack = %d, want 3", m.PeakStackBytes)
+	}
+}
+
 func TestDeviceLookup(t *testing.T) {
 	cases := map[string]struct {
 		v  isa.Variant
 		pc int
 	}{
-		"attiny3217": {isa.VarAVRxt, 2},
-		"atmega328p": {isa.VarAVRePlus, 2},
-		"atmega2560": {isa.VarAVRePlus, 3},
-		"attiny85":   {isa.VarAVRe, 2},
-		"attiny10":   {isa.VarAVRrc, 2},
-		"avr128da48": {isa.VarAVRxt, 2}, // matched by Dx regex
+		"attiny3217":     {isa.VarAVRxt, 2},
+		"atmega328p":     {isa.VarAVRePlus, 2},
+		"atmega328pa":    {isa.VarAVRePlus, 2}, // family fallback
+		"atmega1284pa":   {isa.VarAVRePlus, 2}, // family fallback
+		"atmega2560":     {isa.VarAVRePlus, 3},
+		"attiny85":       {isa.VarAVRe, 2},
+		"attiny84a":      {isa.VarAVRe, 2}, // family fallback
+		"attiny10":       {isa.VarAVRrc, 2},
+		"avr128da48":     {isa.VarAVRxt, 2}, // modern AVR family fallback
+		"atxmega128a4u":  {isa.VarAVRxm, 2}, // family fallback
+		"atxmega256a3bu": {isa.VarAVRxm, 3}, // family fallback
 	}
 	for name, want := range cases {
 		d, ok := isa.LookupDevice(name)

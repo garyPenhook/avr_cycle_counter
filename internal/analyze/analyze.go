@@ -4,11 +4,56 @@ package analyze
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"cyclecount/internal/asm"
 	"cyclecount/internal/isa"
 )
+
+var reObjdumpTarget = regexp.MustCompile(`<([^>]+)>`)
+
+type BranchMode int
+
+const (
+	BranchBounds BranchMode = iota
+	BranchBest
+	BranchWorst
+	BranchTaken
+	BranchNotTaken
+)
+
+func (m BranchMode) String() string {
+	switch m {
+	case BranchBest:
+		return "best"
+	case BranchWorst:
+		return "worst"
+	case BranchTaken:
+		return "taken"
+	case BranchNotTaken:
+		return "not-taken"
+	default:
+		return "bounds"
+	}
+}
+
+func ParseBranchMode(s string) (BranchMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "bounds", "minmax":
+		return BranchBounds, true
+	case "best", "min":
+		return BranchBest, true
+	case "worst", "max":
+		return BranchWorst, true
+	case "taken":
+		return BranchTaken, true
+	case "not-taken", "nottaken", "fallthrough":
+		return BranchNotTaken, true
+	default:
+		return BranchBounds, false
+	}
+}
 
 // Target is the AVR device being analyzed.
 type Target struct {
@@ -34,6 +79,8 @@ type Metrics struct {
 	CyclesMin      int
 	CyclesMax      int
 	PeakStackBytes int
+	PeakPushBytes  int
+	PeakCallBytes  int
 	Pushes         int
 	Pops           int
 	Calls          int
@@ -55,6 +102,7 @@ type Result struct {
 	SRAMStatic int
 	Sections   map[string]int
 	Regions    []Metrics
+	Symbols    []Metrics
 }
 
 func isFlashSection(sec string) bool {
@@ -70,12 +118,235 @@ func isDataSection(sec string) bool {
 		strings.HasPrefix(sec, ".noinit")
 }
 
-func computeMetrics(name string, iter int, lines []*asm.Line, t Target) Metrics {
+func isCondBranch(mn string) bool {
+	return strings.HasPrefix(mn, "BR")
+}
+
+func isSkip(mn string) bool {
+	switch mn {
+	case "CPSE", "SBRC", "SBRS", "SBIC", "SBIS":
+		return true
+	default:
+		return false
+	}
+}
+
+func nextInstrWordCount(lines []*asm.Line, idx int, t Target) (int, bool) {
+	for i := idx + 1; i < len(lines); i++ {
+		ln := lines[i]
+		if ln.Mnemonic == "" {
+			continue
+		}
+		info, ok := isa.Lookup(ln.Mnemonic)
+		if !ok || !isa.Available(ln.Mnemonic, t.Variant, t.PCBytes) {
+			return 0, false
+		}
+		return info.WordCount(t.Variant), true
+	}
+	return 0, false
+}
+
+func prunesPath(mode BranchMode) bool {
+	return mode == BranchTaken || mode == BranchNotTaken
+}
+
+func targetLabel(operands, comment string, valid map[string]int) string {
+	if m := reObjdumpTarget.FindStringSubmatch(comment); m != nil {
+		if _, ok := valid[m[1]]; ok {
+			return m[1]
+		}
+	}
+	target, _, _ := strings.Cut(strings.TrimSpace(operands), ",")
+	target = strings.TrimSpace(target)
+	if _, ok := valid[target]; ok {
+		return target
+	}
+	return ""
+}
+
+func symbolSpans(lines []*asm.Line) map[string][]*asm.Line {
+	out := map[string][]*asm.Line{}
+	for i, ln := range lines {
+		if ln.Label == "" || isLocalLabel(ln.Label) {
+			continue
+		}
+		end := nextSymbolBoundary(lines, i)
+		out[ln.Label] = lines[i:end]
+	}
+	return out
+}
+
+func callTarget(ln *asm.Line, symbols map[string][]*asm.Line) string {
+	valid := map[string]int{}
+	for k := range symbols {
+		valid[k] = 1
+	}
+	return targetLabel(ln.Operands, ln.Comment, valid)
+}
+
+type stackPeak struct {
+	push  int
+	call  int
+	total int
+}
+
+func stackPeaks(name string, lines []*asm.Line, t Target, symbols map[string][]*asm.Line, cache map[string]stackPeak, visiting map[string]bool) stackPeak {
+	if name != "" {
+		if sp, ok := cache[name]; ok {
+			return sp
+		}
+		if visiting[name] {
+			return stackPeak{}
+		}
+		visiting[name] = true
+		defer delete(visiting, name)
+	}
+
+	runningPush, peakPush, peakTotal := 0, 0, 0
+	for _, ln := range lines {
+		if ln.Mnemonic == "" {
+			continue
+		}
+		info, ok := isa.Lookup(ln.Mnemonic)
+		if !ok || !isa.Available(ln.Mnemonic, t.Variant, t.PCBytes) {
+			continue
+		}
+		switch info.Mnemonic {
+		case "PUSH":
+			runningPush++
+			if runningPush > peakPush {
+				peakPush = runningPush
+			}
+			if runningPush > peakTotal {
+				peakTotal = runningPush
+			}
+		case "POP":
+			runningPush--
+			if runningPush < 0 {
+				runningPush = 0
+			}
+		case "CALL", "RCALL", "ICALL", "EICALL":
+			total := runningPush + t.PCBytes
+			if tgt := callTarget(ln, symbols); tgt != "" {
+				if callee, ok := symbols[tgt]; ok {
+					total += stackPeaks(tgt, callee, t, symbols, cache, visiting).total
+				}
+			}
+			if total > peakTotal {
+				peakTotal = total
+			}
+		}
+	}
+	sp := stackPeak{push: peakPush, call: peakTotal - peakPush, total: peakTotal}
+	if sp.call < 0 {
+		sp.call = 0
+	}
+	if name != "" {
+		cache[name] = sp
+	}
+	return sp
+}
+
+func nextInstructionIndex(lines []*asm.Line, idx int) int {
+	for i := idx + 1; i < len(lines); i++ {
+		if lines[i].Mnemonic != "" {
+			return i
+		}
+	}
+	return len(lines)
+}
+
+func executedLineSet(lines []*asm.Line, mode BranchMode) map[int]bool {
+	if !prunesPath(mode) {
+		return nil
+	}
+	labelIndex := map[string]int{}
+	for i, ln := range lines {
+		if ln.Label != "" {
+			labelIndex[ln.Label] = i
+		}
+	}
+	out := map[int]bool{}
+	visited := map[int]bool{}
+	for i := 0; i < len(lines); {
+		ln := lines[i]
+		if ln.Mnemonic == "" {
+			i++
+			continue
+		}
+		if visited[i] {
+			break
+		}
+		visited[i] = true
+		out[i] = true
+
+		switch {
+		case ln.Mnemonic == "RET" || ln.Mnemonic == "RETI":
+			return out
+		case ln.Mnemonic == "RJMP" || ln.Mnemonic == "JMP":
+			if tgt := targetLabel(ln.Operands, ln.Comment, labelIndex); tgt != "" {
+				i = labelIndex[tgt]
+				continue
+			}
+		case isCondBranch(ln.Mnemonic):
+			if mode == BranchTaken {
+				if tgt := targetLabel(ln.Operands, ln.Comment, labelIndex); tgt != "" {
+					i = labelIndex[tgt]
+					continue
+				}
+			}
+		case isSkip(ln.Mnemonic):
+			if mode == BranchTaken {
+				i = nextInstructionIndex(lines, nextInstructionIndex(lines, i))
+				continue
+			}
+		}
+		i++
+	}
+	return out
+}
+
+func branchCycles(info isa.Info, cc isa.CC, lines []*asm.Line, idx int, t Target, mode BranchMode) isa.CC {
+	mn := info.Mnemonic
+	switch {
+	case isCondBranch(mn):
+		switch mode {
+		case BranchBest, BranchNotTaken:
+			return isa.CC{Min: cc.Min, Max: cc.Min}
+		case BranchWorst, BranchTaken:
+			return isa.CC{Min: cc.Max, Max: cc.Max}
+		default:
+			return cc
+		}
+	case isSkip(mn):
+		switch mode {
+		case BranchBounds:
+			return cc
+		case BranchBest, BranchNotTaken:
+			return isa.CC{Min: cc.Min, Max: cc.Min}
+		case BranchWorst:
+			return isa.CC{Min: cc.Max, Max: cc.Max}
+		case BranchTaken:
+			nextWords, ok := nextInstrWordCount(lines, idx, t)
+			if !ok {
+				return isa.CC{Min: cc.Max, Max: cc.Max}
+			}
+			taken := cc.Min + nextWords
+			return isa.CC{Min: taken, Max: taken}
+		default:
+			return cc
+		}
+	default:
+		return cc
+	}
+}
+
+func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode BranchMode, symbols map[string][]*asm.Line) Metrics {
 	m := Metrics{Name: name, Iter: iter, CallBytes: t.PCBytes,
 		Hist: map[string]int{}, Unknown: map[string]int{},
 		Unavailable: map[string]int{}, Unmodeled: map[string]int{}}
-	running, peak := 0, 0
-	for _, ln := range lines {
+	executed := executedLineSet(lines, mode)
+	for idx, ln := range lines {
 		if ln.Directive != "" {
 			if b, ok := asm.DataBytes(ln.Directive, ln.DirectiveArgs); ok && isFlashSection(ln.Section) {
 				m.FlashDataBytes += b
@@ -94,12 +365,16 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target) Metrics 
 			m.Unavailable[info.Mnemonic]++
 			continue
 		}
+		if executed != nil && !executed[idx] {
+			continue
+		}
 		// Available on this target: count it toward instructions and flash.
 		m.InstrCount++
 		m.FlashWords += info.WordCount(t.Variant)
 		m.Hist[info.Mnemonic]++
 
 		if cc, ok := info.Cycles(t.Variant, t.PCBytes); ok {
+			cc = branchCycles(info, cc, lines, idx, t, mode)
 			m.CyclesMin += cc.Min
 			m.CyclesMax += cc.Max
 		} else {
@@ -108,27 +383,35 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target) Metrics 
 
 		switch info.Mnemonic {
 		case "PUSH":
-			running++
-			if running > peak {
-				peak = running
-			}
 			m.Pushes++
 		case "POP":
-			running--
 			m.Pops++
 		case "CALL", "RCALL", "ICALL", "EICALL":
 			m.Calls++
 		}
 	}
-	m.PeakStackBytes = peak
+	seed := ""
+	if _, ok := symbols[name]; ok {
+		seed = name
+	}
+	sp := stackPeaks(seed, lines, t, symbols, map[string]stackPeak{}, map[string]bool{})
+	m.PeakPushBytes = sp.push
+	m.PeakCallBytes = sp.call
+	m.PeakStackBytes = sp.total
 	return m
 }
 
 // Analyze produces whole-file metrics, static SRAM totals, and per-region
 // metrics for every @begin/@end span, all for the given target.
 func Analyze(lines []*asm.Line, t Target) Result {
+	return AnalyzeMode(lines, t, BranchBounds)
+}
+
+// AnalyzeMode produces metrics using the requested conditional-branch policy.
+func AnalyzeMode(lines []*asm.Line, t Target, mode BranchMode) Result {
+	symbols := symbolSpans(lines)
 	res := Result{Target: t, Sections: map[string]int{}}
-	res.File = computeMetrics("(whole file)", 1, lines, t)
+	res.File = computeMetrics("(whole file)", 1, lines, t, mode, symbols)
 	for _, ln := range lines {
 		if ln.Directive == "" {
 			continue
@@ -138,7 +421,8 @@ func Analyze(lines []*asm.Line, t Target) Result {
 			res.Sections[ln.Section] += b
 		}
 	}
-	res.Regions = extractRegions(lines, t)
+	res.Regions = extractRegions(lines, t, mode, symbols)
+	res.Symbols = extractSymbols(lines, t, mode, symbols)
 	return res
 }
 
@@ -148,7 +432,7 @@ type openRegion struct {
 	start int
 }
 
-func extractRegions(lines []*asm.Line, t Target) []Metrics {
+func extractRegions(lines []*asm.Line, t Target, mode BranchMode, symbols map[string][]*asm.Line) []Metrics {
 	var stack []openRegion
 	var out []Metrics
 	for idx, ln := range lines {
@@ -163,7 +447,7 @@ func extractRegions(lines []*asm.Line, t Target) []Metrics {
 				or := stack[j]
 				stack = append(stack[:j], stack[j+1:]...)
 				sub := lines[or.start+1 : idx]
-				out = append(out, computeMetrics(or.name, or.iter, sub, t))
+				out = append(out, computeMetrics(or.name, or.iter, sub, t, mode, symbols))
 				break
 			}
 		}
@@ -171,17 +455,48 @@ func extractRegions(lines []*asm.Line, t Target) []Metrics {
 	return out
 }
 
-// RangeMetrics analyzes the inclusive span between two labels.
-func RangeMetrics(lines []*asm.Line, from, to string, iter int, t Target) (Metrics, error) {
-	fi, ti := -1, -1
+func findLabel(lines []*asm.Line, label string) int {
 	for i, ln := range lines {
-		if ln.Label == from && fi < 0 {
-			fi = i
-		}
-		if ln.Label == to {
-			ti = i
+		if ln.Label == label {
+			return i
 		}
 	}
+	return -1
+}
+
+func isLocalLabel(label string) bool {
+	return strings.HasPrefix(label, ".")
+}
+
+func nextSymbolBoundary(lines []*asm.Line, start int) int {
+	for i := start + 1; i < len(lines); i++ {
+		if lines[i].Label != "" && !isLocalLabel(lines[i].Label) {
+			return i
+		}
+	}
+	return len(lines)
+}
+
+func extractSymbols(lines []*asm.Line, t Target, mode BranchMode, symbols map[string][]*asm.Line) []Metrics {
+	var out []Metrics
+	for i, ln := range lines {
+		if ln.Label == "" || isLocalLabel(ln.Label) {
+			continue
+		}
+		end := nextSymbolBoundary(lines, i)
+		out = append(out, computeMetrics(ln.Label, 1, lines[i:end], t, mode, symbols))
+	}
+	return out
+}
+
+// RangeMetrics analyzes the inclusive span between two labels.
+func RangeMetrics(lines []*asm.Line, from, to string, iter int, t Target) (Metrics, error) {
+	return RangeMetricsMode(lines, from, to, iter, t, BranchBounds)
+}
+
+func RangeMetricsMode(lines []*asm.Line, from, to string, iter int, t Target, mode BranchMode) (Metrics, error) {
+	symbols := symbolSpans(lines)
+	fi, ti := findLabel(lines, from), findLabel(lines, to)
 	if fi < 0 {
 		return Metrics{}, fmt.Errorf("start label %q not found", from)
 	}
@@ -191,5 +506,22 @@ func RangeMetrics(lines []*asm.Line, from, to string, iter int, t Target) (Metri
 	if ti < fi {
 		fi, ti = ti, fi
 	}
-	return computeMetrics(from+":"+to, iter, lines[fi:ti+1], t), nil
+	return computeMetrics(from+":"+to, iter, lines[fi:ti+1], t, mode, symbols), nil
+}
+
+// SymbolMetrics analyzes the span that starts at label and runs until the next
+// non-local symbol boundary (or EOF). This matches objdump function symbols
+// and source-level top-level labels while ignoring interior .L... labels.
+func SymbolMetrics(lines []*asm.Line, label string, iter int, t Target) (Metrics, error) {
+	return SymbolMetricsMode(lines, label, iter, t, BranchBounds)
+}
+
+func SymbolMetricsMode(lines []*asm.Line, label string, iter int, t Target, mode BranchMode) (Metrics, error) {
+	symbols := symbolSpans(lines)
+	start := findLabel(lines, label)
+	if start < 0 {
+		return Metrics{}, fmt.Errorf("symbol %q not found", label)
+	}
+	end := nextSymbolBoundary(lines, start)
+	return computeMetrics(label, iter, lines[start:end], t, mode, symbols), nil
 }

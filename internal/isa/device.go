@@ -15,9 +15,37 @@ type Device struct {
 	PCBytes int
 }
 
-// dxFamily matches the cleanly-named modern parts (AVR Dx/Ex/Du/Sd), all AVRxt
-// with ≤128 KB flash → 16-bit PC.
-var dxFamily = regexp.MustCompile(`^AVR\d+(DA|DB|DD|DU|EA|EB|SD)\d*$`)
+type deviceFamily struct {
+	re      *regexp.Regexp
+	variant Variant
+	pcBytes int
+}
+
+// familyFallbacks cover common AVR naming families so routine suffix variants
+// do not all need hand-curated exact entries. More specific rules go first.
+var familyFallbacks = []deviceFamily{
+	// Modern AVR Dx/Ex/Du/Sd naming. These currently top out at 128 KB flash,
+	// so they use the 16-bit PC / AVRxt core family.
+	{regexp.MustCompile(`^AVR\d+(DA|DB|DD|DU|EA|EB|SD)\d*$`), VarAVRxt, 2},
+
+	// XMEGA: 16/32/64/128 KB classes use a 16-bit PC; 192/256/384 use 22-bit.
+	{regexp.MustCompile(`^ATXMEGA(16|32|64|128)[A-Z0-9]*$`), VarAVRxm, 2},
+	{regexp.MustCompile(`^ATXMEGA(192|256|384)[A-Z0-9]*$`), VarAVRxm, 3},
+
+	// Common classic megaAVR suffix variants not worth listing individually.
+	{regexp.MustCompile(`^ATMEGA(48|88|168|328)(A|P|PA|PB)?$`), VarAVRePlus, 2},
+	{regexp.MustCompile(`^ATMEGA(164|324|644|1284)(A|P|PA|PB)?$`), VarAVRePlus, 2},
+	{regexp.MustCompile(`^ATMEGA(64|128)(A)?$`), VarAVRePlus, 2},
+	{regexp.MustCompile(`^ATMEGA(1280|1281)$`), VarAVRePlus, 2},
+	{regexp.MustCompile(`^ATMEGA(2560|2561)$`), VarAVRePlus, 3},
+
+	// Common classic tinyAVR suffix variants.
+	{regexp.MustCompile(`^ATTINY(13|24|25|44|45|84|85)(A)?$`), VarAVRe, 2},
+	{regexp.MustCompile(`^ATTINY(2313|4313|167|1634)(A)?$`), VarAVRe, 2},
+
+	// Reduced-core tinyAVR family.
+	{regexp.MustCompile(`^ATTINY(4|5|9|10|20|40|102|104)$`), VarAVRrc, 2},
+}
 
 // devices is a curated lookup seeded from the manual's device tables. It is not
 // exhaustive — any AVR can still be analyzed by passing -core (and -pc for
@@ -92,8 +120,10 @@ func LookupDevice(name string) (Device, bool) {
 	if d, ok := devices[N]; ok {
 		return d, true
 	}
-	if dxFamily.MatchString(N) {
-		return Device{Name: N, Variant: VarAVRxt, PCBytes: 2}, true
+	for _, f := range familyFallbacks {
+		if f.re.MatchString(N) {
+			return Device{Name: N, Variant: f.variant, PCBytes: f.pcBytes}, true
+		}
 	}
 	return Device{}, false
 }
