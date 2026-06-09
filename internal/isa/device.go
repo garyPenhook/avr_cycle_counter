@@ -2,6 +2,7 @@ package isa
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -112,6 +113,35 @@ func init() {
 	reg(VarAVRxm, 3,
 		"ATxmega192A3U", "ATxmega192C3", "ATxmega256A3U", "ATxmega256A3BU",
 		"ATxmega256C3", "ATxmega384C3", "ATxmega384D3")
+}
+
+// Devices returns the curated part-number table sorted by name. It is not
+// exhaustive — parts matched only by a family fallback are not listed here.
+func Devices() []Device {
+	out := make([]Device, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Family describes one naming-pattern fallback used when a part has no exact
+// curated entry.
+type Family struct {
+	Pattern string // the regular expression matched against the upper-cased part
+	Variant Variant
+	PCBytes int
+}
+
+// Families returns the family-pattern fallbacks, most specific first (the order
+// they are tried in).
+func Families() []Family {
+	out := make([]Family, 0, len(familyFallbacks))
+	for _, f := range familyFallbacks {
+		out = append(out, Family{Pattern: f.re.String(), Variant: f.variant, PCBytes: f.pcBytes})
+	}
+	return out
 }
 
 // LookupDevice resolves a part number (case-insensitive) to its Device entry.

@@ -205,6 +205,13 @@ The full set (all optional; sensible defaults shown in parentheses):
 | `-cpp`       | run the C preprocessor over `.S`/`.s` source before parsing   |
 | `-cc P`      | compiler driver used for `-cpp` (default `avr-gcc`)           |
 | `-D NAME=VAL` / `-I DIR` | preprocessor define / include dir for `-cpp` (repeatable) |
+| `-list-mcus` | print the known part numbers and family fallbacks, then exit  |
+| `-version`   | print the build version, then exit                            |
+
+`-list-mcus` and `-version` exit without reading a file. `-list-mcus` shows the
+curated part table (part → core → PC width) plus the naming-pattern fallbacks;
+any AVR it does not list can still be analyzed with `-core` (and `-pc 3` for
+parts over 128 KB of flash).
 
 `-mcu` and `-core` also accept comma-separated lists for a multi-target
 comparison run, for example `-mcu attiny3217,atmega328p,attiny10` or

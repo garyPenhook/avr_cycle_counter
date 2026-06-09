@@ -93,6 +93,37 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
+func TestDevicesSortedAndConsistent(t *testing.T) {
+	devs := isa.Devices()
+	if len(devs) == 0 {
+		t.Fatal("Devices() returned no entries")
+	}
+	for i := 1; i < len(devs); i++ {
+		if devs[i-1].Name > devs[i].Name {
+			t.Fatalf("Devices() not sorted: %q before %q", devs[i-1].Name, devs[i].Name)
+		}
+	}
+	// Every listed device must round-trip through LookupDevice unchanged.
+	for _, d := range devs {
+		got, ok := isa.LookupDevice(d.Name)
+		if !ok || got.Variant != d.Variant || got.PCBytes != d.PCBytes {
+			t.Errorf("LookupDevice(%q) = %+v,%t; want %+v", d.Name, got, ok, d)
+		}
+	}
+}
+
+func TestFamilies(t *testing.T) {
+	fams := isa.Families()
+	if len(fams) == 0 {
+		t.Fatal("Families() returned no entries")
+	}
+	// A part matched only by a family pattern should resolve via the fallback.
+	d, ok := isa.LookupDevice("avr128da48")
+	if !ok || d.Variant != isa.VarAVRxt || d.PCBytes != 2 {
+		t.Errorf("avr128da48 family fallback = %+v,%t; want AVRxt/pc2", d, ok)
+	}
+}
+
 func TestWordCount(t *testing.T) {
 	lds, _ := isa.Lookup("LDS")
 	if got := lds.WordCount(isa.VarAVRrc); got != 1 {

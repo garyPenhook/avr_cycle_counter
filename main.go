@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -51,6 +52,9 @@ var (
 
 	flCPP = flag.Bool("cpp", false, "run the C preprocessor (#include/#define/#if) over .S/.s source before parsing")
 	flCC  = flag.String("cc", "avr-gcc", "compiler driver used for -cpp")
+
+	flVersion  = flag.Bool("version", false, "print version and exit")
+	flListMCUs = flag.Bool("list-mcus", false, "list known MCU part numbers and core/PC mapping, then exit")
 
 	flDefine  multiFlag // -D NAME[=VAL], repeatable; passed to -cpp
 	flInclude multiFlag // -I DIR, repeatable; passed to -cpp
@@ -92,6 +96,10 @@ Gate a build in CI with cost budgets (exit 3 when any limit is exceeded):
 Expand the C preprocessor on .S/.s source before parsing (#include/#define/#if):
     -cpp [-cc avr-gcc] [-D NAME=VAL ...] [-I dir ...]
 
+Discover what is supported (these exit without reading a file):
+    -list-mcus             print the known part numbers and family fallbacks
+    -version               print the build version
+
 flags:
 `)
 	flag.PrintDefaults()
@@ -114,6 +122,73 @@ examples:
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "cyclecount:", err)
 	os.Exit(1)
+}
+
+// version is overridable at build time with -ldflags "-X main.version=...".
+var version = ""
+
+// versionString reports the build version: the ldflags override when set,
+// otherwise the VCS revision embedded by the Go toolchain, else "dev".
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		rev, dirty := "", ""
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				if s.Value == "true" {
+					dirty = "-dirty"
+				}
+			}
+		}
+		if rev != "" {
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return rev + dirty
+		}
+		if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			return bi.Main.Version
+		}
+	}
+	return "dev"
+}
+
+// pcBitsFor maps a PC byte width to its bit count for display.
+func pcBitsFor(pcBytes int) int {
+	if pcBytes >= 3 {
+		return 22
+	}
+	return 16
+}
+
+// listMCUs prints the curated part table and the family-pattern fallbacks.
+func listMCUs(w io.Writer) {
+	devs := isa.Devices()
+	fmt.Fprintf(w, "Known MCU part numbers (%d) — pass one with -mcu:\n\n", len(devs))
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  part\tcore\tpc")
+	fmt.Fprintln(tw, "  ----\t----\t--")
+	for _, d := range devs {
+		fmt.Fprintf(tw, "  %s\t%s\t%d-bit\n", d.Name, d.Variant, pcBitsFor(d.PCBytes))
+	}
+	tw.Flush()
+
+	fmt.Fprintln(w, "\nFamily fallbacks (any part matching a pattern resolves without an exact entry):")
+	ftw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(ftw, "  pattern\tcore\tpc")
+	fmt.Fprintln(ftw, "  -------\t----\t--")
+	for _, f := range isa.Families() {
+		fmt.Fprintf(ftw, "  %s\t%s\t%d-bit\n", f.Pattern, f.Variant, pcBitsFor(f.PCBytes))
+	}
+	ftw.Flush()
+
+	fmt.Fprintln(w, "\nAny AVR not listed can still be analyzed with -core {avr|avre|avre+|avrxm|avrxt|avrrc}")
+	fmt.Fprintln(w, "(add -pc 3 for parts with more than 128 KB of flash).")
 }
 
 func csvList(s string) []string {
@@ -203,10 +278,7 @@ func resolveTargets() ([]analyze.Target, error) {
 }
 
 func pcBits(t analyze.Target) int {
-	if t.PCBytes >= 3 {
-		return 22
-	}
-	return 16
+	return pcBitsFor(t.PCBytes)
 }
 
 type analysisRun struct {
@@ -344,6 +416,14 @@ func main() {
 	flag.Var(&flDefine, "D", "preprocessor define NAME[=VAL] for -cpp (repeatable)")
 	flag.Var(&flInclude, "I", "preprocessor include directory for -cpp (repeatable)")
 	flag.Parse()
+	if *flVersion {
+		fmt.Println("cyclecount", versionString())
+		return
+	}
+	if *flListMCUs {
+		listMCUs(os.Stdout)
+		return
+	}
 	files := flag.Args()
 	if len(files) == 0 {
 		usage()
