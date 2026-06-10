@@ -21,12 +21,21 @@ gives a cycle column for each. `cyclecount` implements all of them:
 
 | Variant | Typical parts | Notable timing |
 |---------|---------------|----------------|
-| `avr`   | ATtiny11/12/15/26 (original 1995 core) | no MOVW/MUL/CALL/JMP |
+| `avr`   | ATtiny11/12/15/26 (original core) | no MOVW/MUL |
 | `avre`  | classic ATtiny (13/25/45/85, 2313 …) | same timing as AVR, + MOVW |
 | `avre+` | classic ATmega / AT90 (328P, 2560, 32U4 …) | + multiply |
 | `avrxm` | XMEGA (ATxmega…) | RMW (XCH/LAx), faster ST/PUSH |
 | `avrxt` | tinyAVR 0/1/2, megaAVR 0, AVR Dx/Ex/Du | 1-cycle ST/PUSH/SBI, 3-cycle CALL |
 | `avrrc` | Reduced Core (ATtiny4/5/9/10/20/40/102/104) | 16 registers, no ADIW/MUL/CALL |
+
+`CALL`/`JMP` are deliberately **not** listed as a per-core feature above. In
+Microchip's documentation they are device-sensitive in Appendix A, so they are
+better treated as part-specific details than as a simple core-level rule.
+
+When you know the exact MCU, prefer `-mcu` over bare `-core`: that lets
+`cyclecount` apply the device-specific missing-instruction tables from Appendix
+A (for example parts that lack `CALL`, `ELPM`, `EIJMP`, `EICALL`, `SPM`, or
+`BREAK` even though the broader core family supports them).
 
 Pick a target three ways (default is **ATtiny3217 / AVRxt**):
 
@@ -62,8 +71,9 @@ Every cycle count, word size, and per-core availability flag comes from the
 
 - `#Clocks AVRe / AVRxm / AVRxt / AVRrc` columns of the Instruction Set Summary
   (Tables 5-2 … 5-6) and the per-instruction `Cycles` tables.
-- **Table 7-1 Core Descriptions** for which instructions exist on each variant.
-- **§7.2 device tables** (Appendix A) for the part-number → core / PC-width map.
+- **Table 7-1 Core Descriptions** for the core-level instruction families.
+- **§7.2 device tables** (Appendix A) for the part-number → core / PC-width map
+  and the per-device missing-instruction overrides.
 
 The data lives in plain, readable Go — [`internal/isa/isa.go`](internal/isa/isa.go)
 (timing + availability) and [`internal/isa/device.go`](internal/isa/device.go)
@@ -84,7 +94,7 @@ use a 22-bit PC, which adds one cycle to `CALL`/`RCALL`/`ICALL`/`RET`/`RETI`.
 `avr-objdump` ships with the AVR GNU toolchain (the same package that gives you
 `avr-gcc`). Install it with your system's package manager — e.g. Debian/Ubuntu
 `sudo apt install binutils-avr gcc-avr`, Arch `pacman -S avr-binutils avr-gcc`,
-macOS `brew install avr-gcc`, or Microchip's official AVR/GNU toolchain.
+or Microchip's official AVR/GNU toolchain.
 
 `cyclecount` finds `avr-objdump` via your `$PATH` (it hard-codes no paths); if
 it lives somewhere unusual, point at it with `-objdump /path/to/avr-objdump`.

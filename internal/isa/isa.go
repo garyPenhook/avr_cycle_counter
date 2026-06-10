@@ -20,7 +20,7 @@ import "strings"
 type Variant int
 
 const (
-	VarAVR      Variant = iota // original 1995 core
+	VarAVR      Variant = iota // original core (AT90S, first shipped 1997)
 	VarAVRe                    // + MOVW, enhanced LPM
 	VarAVRePlus                // + multiply / extended-range
 	VarAVRxm                   // XMEGA
@@ -43,6 +43,34 @@ var variantLabel = map[Variant]string{
 
 func (v Variant) String() string { return variantLabel[v] }
 
+// MissingSet is the device-specific set of instructions Appendix A lists as
+// absent on a resolved part.
+type MissingSet map[string]bool
+
+// NewMissingSet builds a case-normalized missing-instruction set.
+func NewMissingSet(mnemonics ...string) MissingSet {
+	if len(mnemonics) == 0 {
+		return nil
+	}
+	set := make(MissingSet, len(mnemonics))
+	for _, mn := range mnemonics {
+		set[strings.ToUpper(strings.TrimSpace(mn))] = true
+	}
+	return set
+}
+
+// Clone returns a copy suitable for attaching to a specific Device/Target.
+func (m MissingSet) Clone() MissingSet {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(MissingSet, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // ParseVariant resolves a core name (case-insensitive) to a Variant.
 func ParseVariant(s string) (Variant, bool) {
 	v, ok := variantNames[strings.ToLower(strings.TrimSpace(s))]
@@ -55,9 +83,9 @@ type CC struct {
 	NA       bool
 }
 
-func c1(n int) CC     { return CC{Min: n, Max: n} }
-func cr(a, b int) CC  { return CC{Min: a, Max: b} }
-func na() CC          { return CC{NA: true} }
+func c1(n int) CC    { return CC{Min: n, Max: n} }
+func cr(a, b int) CC { return CC{Min: a, Max: b} }
+func na() CC         { return CC{NA: true} }
 
 type cyc struct{ e, xm, xt, rc CC } // AVRe / AVRxm / AVRxt / AVRrc columns
 
@@ -229,11 +257,14 @@ func avail(mnemonics []string, variants ...Variant) {
 }
 
 func init() {
-	// Present on AVR..AVRxt but not the Reduced Core:
+	// Present on AVR..AVRxt but not the Reduced Core. ADIW/SBIW also save a
+	// flash word over SUBI+SBCI but cost the same 2 cycles (size, not speed):
 	avail([]string{"ADIW", "SBIW", "LDD", "STD", "LPM"},
 		VarAVR, VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt)
-	// MOVW/CALL/JMP/SPM exist from AVRe upward (not original AVR, not rc):
-	avail([]string{"MOVW", "CALL", "JMP", "SPM"},
+	// MOVW/SPM are enhanced-core features (AVRe upward, not original AVR/rc).
+	// Device-specific omissions such as CALL/JMP/ELPM on some parts are handled
+	// by Appendix-A overlays via AvailableOnTarget, not by this core-level table.
+	avail([]string{"MOVW", "SPM"},
 		VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt)
 	avail([]string{"BREAK"}, VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt, VarAVRrc)
 	// Multiply / extended-range / ELPM: AVRe+ upward:
@@ -246,9 +277,14 @@ func init() {
 	avail([]string{"DES", "XCH", "LAC", "LAS", "LAT"}, VarAVRxm)
 }
 
-// Available reports whether a mnemonic exists on the given variant and PC width.
-func Available(mnemonic string, v Variant, pcBytes int) bool {
+// Available reports whether a mnemonic exists on the given core variant and PC
+// width. It intentionally does not model device-specific omissions from
+// Appendix A; use AvailableOnTarget when a concrete MCU has been resolved.
+func Available(mnemonic string, v Variant, pcBytes, flashKB int) bool {
 	M := strings.ToUpper(strings.TrimSpace(mnemonic))
+	if v == VarAVRrc && (M == "CALL" || M == "JMP") {
+		return false
+	}
 	if v == VarAVRxt && (M == "EICALL" || M == "EIJMP") {
 		return pcBytes >= 3 // valid on AVRxt only for >128 KB devices
 	}
@@ -257,4 +293,16 @@ func Available(mnemonic string, v Variant, pcBytes int) bool {
 		return true // present on all variants
 	}
 	return set[v]
+}
+
+// AvailableOnTarget overlays the generic core-level availability with the
+// device-specific missing-instruction table from Appendix A. When no device is
+// resolved (for example, -core without -mcu), missing may be nil and the
+// result falls back to Available.
+func AvailableOnTarget(mnemonic string, v Variant, pcBytes, flashKB int, missing MissingSet) bool {
+	M := strings.ToUpper(strings.TrimSpace(mnemonic))
+	if missing != nil && missing[M] {
+		return false
+	}
+	return Available(M, v, pcBytes, flashKB)
 }

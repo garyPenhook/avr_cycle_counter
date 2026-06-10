@@ -207,13 +207,17 @@ func csvList(s string) []string {
 }
 
 func resolveTarget() (analyze.Target, error) {
-	t := analyze.Target{Name: "ATtiny3217", Variant: isa.VarAVRxt, PCBytes: 2}
+	dflt, ok := isa.LookupDevice(defaultMCU)
+	if !ok {
+		return analyze.Target{}, fmt.Errorf("internal error: default device %q not found", defaultMCU)
+	}
+	t := analyze.Target{Name: dflt.Name, Variant: dflt.Variant, PCBytes: dflt.PCBytes, FlashKB: dflt.FlashKB, Missing: dflt.Missing}
 	if *flMCU != "" {
 		d, ok := isa.LookupDevice(*flMCU)
 		if !ok {
 			return t, fmt.Errorf("unknown device %q — pass -core {avr|avre|avre+|avrxm|avrxt|avrrc} (and -pc 3 for >128 KB parts) instead", *flMCU)
 		}
-		t = analyze.Target{Name: d.Name, Variant: d.Variant, PCBytes: d.PCBytes}
+		t = analyze.Target{Name: d.Name, Variant: d.Variant, PCBytes: d.PCBytes, FlashKB: d.FlashKB, Missing: d.Missing}
 	}
 	if *flCore != "" {
 		v, ok := isa.ParseVariant(*flCore)
@@ -223,6 +227,8 @@ func resolveTarget() (analyze.Target, error) {
 		t.Variant = v
 		if *flMCU == "" {
 			t.Name = v.String()
+			t.FlashKB = 0
+			t.Missing = nil
 		}
 	}
 	if *flPC != 0 {
@@ -720,7 +726,7 @@ func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float
 		fmt.Fprintln(w)
 	}
 
-	warnSet(w, "✘ unavailable ", m.Unavailable, fmt.Sprintf("not implemented on %s — will not assemble", t.Variant))
+	warnSet(w, "✘ unavailable ", m.Unavailable, "not implemented on this target — will not assemble")
 	warnSet(w, "● not modeled ", m.Unmodeled, "counted for size, cycles are data/programming dependent")
 	warnSet(w, "⚠ unrecognized", m.Unknown, "not counted — check syntax or extend the ISA table")
 
@@ -751,8 +757,8 @@ func renderListing(w io.Writer, m analyze.Metrics, t analyze.Target) {
 		if lm.Known {
 			words = fmt.Sprintf("%d", lm.Info.WordCount(t.Variant))
 			switch {
-			case !isa.Available(lm.Line.Mnemonic, t.Variant, t.PCBytes):
-				cyc, note = "n/a", "not on "+t.Variant.String()
+			case !isa.AvailableOnTarget(lm.Line.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing):
+				cyc, note = "n/a", "not on "+t.Name
 			case lm.Info.Special != "":
 				cyc, note = "—", lm.Info.Special
 			default:

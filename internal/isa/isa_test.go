@@ -67,28 +67,65 @@ func TestCycles(t *testing.T) {
 
 func TestAvailable(t *testing.T) {
 	cases := []struct {
-		mn   string
-		v    isa.Variant
-		pc   int
-		want bool
+		mn      string
+		v       isa.Variant
+		pc      int
+		flashKB int
+		want    bool
 	}{
-		{"ADD", isa.VarAVRrc, 2, true}, // present on every variant
-		{"MUL", isa.VarAVRe, 2, false}, // AVRe+ and up only
-		{"MUL", isa.VarAVRePlus, 2, true},
-		{"CALL", isa.VarAVR, 2, false}, // not on the original core
-		{"CALL", isa.VarAVRe, 2, true},
-		{"MOVW", isa.VarAVR, 2, false},
-		{"BREAK", isa.VarAVR, 2, false},
-		{"BREAK", isa.VarAVRrc, 2, true},
-		{"EICALL", isa.VarAVRxt, 2, false}, // AVRxt only for >128 KB parts
-		{"EICALL", isa.VarAVRxt, 3, true},
-		{"EICALL", isa.VarAVRePlus, 2, true},
-		{"DES", isa.VarAVRxm, 2, true},
-		{"DES", isa.VarAVRxt, 2, false},
+		{"ADD", isa.VarAVRrc, 2, 1, true}, // present on every variant
+		{"MUL", isa.VarAVRe, 2, 8, false}, // AVRe+ and up only
+		{"MUL", isa.VarAVRePlus, 2, 32, true},
+		{"CALL", isa.VarAVRrc, 2, 4, false}, // Reduced Core never has CALL/JMP
+		{"CALL", isa.VarAVRe, 2, 0, true},   // core-level availability only
+		{"MOVW", isa.VarAVR, 2, 128, false}, // MOVW is core-gated, not flash-gated
+		{"MOVW", isa.VarAVRe, 2, 1, true},   // ATtiny13: 1 KB but has MOVW
+		{"BREAK", isa.VarAVR, 2, 1, false},
+		{"BREAK", isa.VarAVRrc, 2, 1, true},
+		{"EICALL", isa.VarAVRxt, 2, 32, false}, // AVRxt only for >128 KB parts
+		{"EICALL", isa.VarAVRxt, 3, 256, true},
+		{"EICALL", isa.VarAVRePlus, 2, 64, true},
+		{"DES", isa.VarAVRxm, 2, 64, true},
+		{"DES", isa.VarAVRxt, 2, 32, false},
 	}
 	for _, c := range cases {
-		if got := isa.Available(c.mn, c.v, c.pc); got != c.want {
-			t.Errorf("Available(%q,%v,pc%d) = %t; want %t", c.mn, c.v, c.pc, got, c.want)
+		if got := isa.Available(c.mn, c.v, c.pc, c.flashKB); got != c.want {
+			t.Errorf("Available(%q,%v,pc%d,flash%d) = %t; want %t", c.mn, c.v, c.pc, c.flashKB, got, c.want)
+		}
+	}
+}
+
+func TestAvailableOnTarget(t *testing.T) {
+	cases := []struct {
+		device string
+		mn     string
+		want   bool
+	}{
+		{"attiny85", "CALL", false},
+		{"attiny85", "MOVW", true},
+		{"attiny1634", "CALL", true},
+		{"atmega48p", "JMP", false},
+		{"atmega328p", "JMP", true},
+		{"atmega328p", "ELPM", false},
+		{"atmega2560", "EICALL", true},
+		{"attiny3217", "CALL", true},
+		{"attiny804", "CALL", false},
+		{"attiny804", "SPM", false},
+		{"avr128da48", "ELPM", true},
+		{"avr128da48", "EICALL", false},
+		{"avr64da48", "ELPM", false},
+		{"attiny11", "LPM", false},
+		{"attiny26", "CALL", true},
+		{"attiny40", "BREAK", true},
+		{"attiny10", "BREAK", false},
+	}
+	for _, c := range cases {
+		d, ok := isa.LookupDevice(c.device)
+		if !ok {
+			t.Fatalf("LookupDevice(%q) failed", c.device)
+		}
+		if got := isa.AvailableOnTarget(c.mn, d.Variant, d.PCBytes, d.FlashKB, d.Missing); got != c.want {
+			t.Errorf("AvailableOnTarget(%q on %s) = %t; want %t", c.mn, d.Name, got, c.want)
 		}
 	}
 }
@@ -106,7 +143,7 @@ func TestDevicesSortedAndConsistent(t *testing.T) {
 	// Every listed device must round-trip through LookupDevice unchanged.
 	for _, d := range devs {
 		got, ok := isa.LookupDevice(d.Name)
-		if !ok || got.Variant != d.Variant || got.PCBytes != d.PCBytes {
+		if !ok || got.Variant != d.Variant || got.PCBytes != d.PCBytes || got.FlashKB != d.FlashKB {
 			t.Errorf("LookupDevice(%q) = %+v,%t; want %+v", d.Name, got, ok, d)
 		}
 	}
@@ -119,8 +156,15 @@ func TestFamilies(t *testing.T) {
 	}
 	// A part matched only by a family pattern should resolve via the fallback.
 	d, ok := isa.LookupDevice("avr128da48")
-	if !ok || d.Variant != isa.VarAVRxt || d.PCBytes != 2 {
-		t.Errorf("avr128da48 family fallback = %+v,%t; want AVRxt/pc2", d, ok)
+	if !ok || d.Variant != isa.VarAVRxt || d.PCBytes != 2 || d.FlashKB != 128 {
+		t.Errorf("avr128da48 family fallback = %+v,%t; want AVRxt/pc2/128KB", d, ok)
+	}
+	// ATtiny85 (family fallback) has MOVW but no CALL/JMP.
+	t85, _ := isa.LookupDevice("attiny85")
+	if t85.FlashKB != 8 ||
+		!isa.AvailableOnTarget("MOVW", t85.Variant, t85.PCBytes, t85.FlashKB, t85.Missing) ||
+		isa.AvailableOnTarget("CALL", t85.Variant, t85.PCBytes, t85.FlashKB, t85.Missing) {
+		t.Errorf("attiny85 = %+v; want MOVW but no CALL", t85)
 	}
 }
 

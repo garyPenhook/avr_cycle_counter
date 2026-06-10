@@ -61,6 +61,8 @@ type Target struct {
 	Name    string // display name (device part number or core)
 	Variant isa.Variant
 	PCBytes int // 2 (16-bit PC) or 3 (22-bit PC)
+	FlashKB int // program-memory size in KiB; 0 = unknown
+	Missing isa.MissingSet
 }
 
 // LineMetric pairs a source instruction line with its ISA timing info.
@@ -141,7 +143,7 @@ func nextInstrWordCount(lines []*asm.Line, idx int, t Target) (int, bool) {
 			continue
 		}
 		info, ok := isa.Lookup(ln.Mnemonic)
-		if !ok || !isa.Available(ln.Mnemonic, t.Variant, t.PCBytes) {
+		if !ok || !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 			return 0, false
 		}
 		return info.WordCount(t.Variant), true
@@ -255,7 +257,7 @@ func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool,
 			continue
 		}
 		info, ok := isa.Lookup(ln.Mnemonic)
-		if !ok || !isa.Available(ln.Mnemonic, t.Variant, t.PCBytes) {
+		if !ok || !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 			continue
 		}
 		switch info.Mnemonic {
@@ -410,7 +412,7 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 			m.Unknown[ln.Mnemonic]++
 			continue
 		}
-		if !isa.Available(ln.Mnemonic, t.Variant, t.PCBytes) {
+		if !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 			m.Unavailable[info.Mnemonic]++
 			continue
 		}
