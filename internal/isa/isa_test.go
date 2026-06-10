@@ -42,6 +42,10 @@ func TestCycles(t *testing.T) {
 		{"CALL", isa.VarAVRxt, 2, 3, 3, true},
 		{"RET", isa.VarAVRrc, 2, 6, 6, true},
 		{"RET", isa.VarAVRePlus, 3, 5, 5, true},
+		// EICALL has a single fixed cost (Table 6-51): no +1 on 22-bit PC,
+		// since it only exists on extended-PC parts in the first place.
+		{"EICALL", isa.VarAVRePlus, 3, 4, 4, true},
+		{"EICALL", isa.VarAVRxt, 3, 3, 3, true},
 		{"PUSH", isa.VarAVRe, 2, 2, 2, true},
 		{"PUSH", isa.VarAVRxt, 2, 1, 1, true},
 		{"BRNE", isa.VarAVRxt, 2, 1, 2, true},
@@ -116,7 +120,7 @@ func TestAvailableOnTarget(t *testing.T) {
 		{"avr128da48", "EICALL", false},
 		{"avr64da48", "ELPM", false},
 		{"attiny11", "LPM", true},
-		{"attiny26", "CALL", true},
+		{"attiny26", "CALL", false}, // original AVR core lacks CALL/JMP (Table 7-1)
 		{"attiny40", "BREAK", true},
 		{"attiny10", "BREAK", false},
 	}

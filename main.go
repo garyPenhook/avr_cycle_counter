@@ -685,7 +685,7 @@ func renderReport(w io.Writer, res analyze.Result, rng *analyze.Metrics, path st
 	case "best", "worst", "min", "max":
 		fmt.Fprintln(w, "Best/worst mode constrains conditional timing only; it does not prune later instructions from the listing.")
 	}
-	fmt.Fprintln(w, "LD/ST/LDS/STS add 1 cycle when the access targets NVM (manual note 2).")
+	fmt.Fprintln(w, "LD/LDD/ST/STD/LDS/STS add 1 cycle when the access targets NVM (manual note 2).")
 }
 
 func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float64, verbose bool) {

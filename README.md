@@ -28,9 +28,13 @@ gives a cycle column for each. `cyclecount` implements all of them:
 | `avrxt` | tinyAVR 0/1/2, megaAVR 0, AVR Dx/Ex/Du | 1-cycle ST/PUSH/SBI, 3-cycle CALL |
 | `avrrc` | Reduced Core (ATtiny4/5/9/10/20/40/102/104) | 16 registers, no ADIW/MUL/CALL |
 
-`CALL`/`JMP` are deliberately **not** listed as a per-core feature above. In
-Microchip's documentation they are device-sensitive in Appendix A, so they are
-better treated as part-specific details than as a simple core-level rule.
+`CALL`/`JMP` are left out of the "notable timing" column above only because
+they don't distinguish the *enhanced* cores from each other. The manual still
+treats them as a core-level rule: **Table 7-1** lists `CALL`/`JMP` as present on
+AVRe/AVRe+/AVRxm/AVRxt and **absent on both the original `avr` core and the
+Reduced Core (`avrrc`)**. On top of that, many individual parts list `CALL`/`JMP`
+as missing in Appendix A, so `cyclecount` applies both — the core-level absence
+on `avr`/`avrrc` and the per-device overrides.
 
 When you know the exact MCU, prefer `-mcu` over bare `-core`: that lets
 `cyclecount` apply the device-specific missing-instruction tables from Appendix
@@ -71,7 +75,8 @@ Every cycle count, word size, and per-core availability flag comes from the
 
 - `#Clocks AVRe / AVRxm / AVRxt / AVRrc` columns of the Instruction Set Summary
   (Tables 5-2 … 5-6) and the per-instruction `Cycles` tables.
-- **Table 7-1 Core Descriptions** for the core-level instruction families.
+- **Table 7-1 Core Description** for the core-level instruction families
+  (including the `CALL`/`JMP` core-level rule noted above).
 - **§7.2 device tables** (Appendix A) for the part-number → core / PC-width map
   and the per-device missing-instruction overrides.
 
@@ -281,7 +286,7 @@ Clock: 20 MHz.                                    ← from -clock (omit with -cl
     .bss       : 32 B                            ← per-section breakdown
 
 Notes: branch/skip cycles are min–max; the exact path depends on data.
-LD/ST/LDS/STS add 1 cycle when the access targets NVM (manual note 2).
+LD/LDD/ST/STD/LDS/STS add 1 cycle when the access targets NVM (manual note 2).
 ```
 
 Add `-v` for a per-instruction table (line, mnemonic, operands, words, cycles,

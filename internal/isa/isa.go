@@ -11,7 +11,8 @@
 // Call/return timing and stack usage depend on the Program Counter width:
 // devices with ≤128 KB flash use a 16-bit PC (2-byte return address); larger
 // parts use a 22-bit PC (3-byte return address), which the manual notes adds
-// one cycle to CALL/RCALL/ICALL/EICALL/RET/RETI.
+// one cycle to CALL/RCALL/ICALL/RET/RETI. (EICALL exists only on extended-PC
+// parts and has a single fixed cycle count, so it is not in that +1 set.)
 package isa
 
 import "strings"
@@ -148,7 +149,10 @@ func init() {
 	add(2, c1(3), c1(3), c1(3), na(), "", "JMP")
 	addCall(2, c1(4), c1(3), c1(3), na(), "CALL")
 	addCall(1, c1(3), c1(2), c1(2), c1(3), "RCALL", "ICALL")
-	addCall(1, c1(4), c1(3), c1(3), na(), "EICALL")
+	// EICALL exists only on extended-PC (>128 KB) parts; the manual gives a
+	// single fixed cycle count (Table 6-51: AVRe 4, AVRxm 3, AVRxt 3) with no
+	// 16-/22-bit split, so it is NOT CallLike — the +1 is already baked in.
+	add(1, c1(4), c1(3), c1(3), na(), "extended indirect call", "EICALL")
 	addCall(1, c1(4), c1(4), c1(4), c1(6), "RET", "RETI")
 	add(1, cr(1, 3), cr(1, 3), cr(1, 3), cr(1, 2),
 		"skip: 1 no-skip / 2 skip 1-word / 3 skip 2-word",
@@ -266,6 +270,11 @@ func init() {
 	// by Appendix-A overlays via AvailableOnTarget, not by this core-level table.
 	avail([]string{"MOVW", "SPM"},
 		VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt)
+	// CALL/JMP are absent on both the original AVR core and the Reduced Core
+	// (Table 7-1 Core Description: present only on AVRe/AVRe+/AVRxm/AVRxt).
+	// Device-specific omissions on enhanced parts are layered on via Appendix A.
+	avail([]string{"CALL", "JMP"},
+		VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt)
 	avail([]string{"BREAK"}, VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt, VarAVRrc)
 	// Multiply / extended-range / ELPM: AVRe+ upward:
 	avail([]string{"MUL", "MULS", "MULSU", "FMUL", "FMULS", "FMULSU", "ELPM"},
@@ -282,9 +291,6 @@ func init() {
 // Appendix A; use AvailableOnTarget when a concrete MCU has been resolved.
 func Available(mnemonic string, v Variant, pcBytes, flashKB int) bool {
 	M := strings.ToUpper(strings.TrimSpace(mnemonic))
-	if v == VarAVRrc && (M == "CALL" || M == "JMP") {
-		return false
-	}
 	if M == "EICALL" || M == "EIJMP" {
 		if v == VarAVRxt || v == VarAVRePlus || v == VarAVRxm {
 			return pcBytes >= 3
