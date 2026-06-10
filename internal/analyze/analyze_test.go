@@ -507,3 +507,49 @@ func TestDeviceLookup(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeUsesOperandQualifiedMissingInstructions(t *testing.T) {
+	d, ok := isa.LookupDevice("attiny11")
+	if !ok {
+		t.Fatal("LookupDevice(attiny11) failed")
+	}
+	target := analyze.Target{Name: d.Name, Variant: d.Variant, PCBytes: d.PCBytes, FlashKB: d.FlashKB, Missing: d.Missing}
+	src := `f:
+	ld r16, X
+	lpm
+`
+	m := analyze.Analyze(asm.Parse(src), target).File
+	if m.Unavailable["LD"] != 1 {
+		t.Fatalf("LD r16, X should be unavailable, got %v", m.Unavailable)
+	}
+	if m.Hist["LPM"] != 1 {
+		t.Fatalf("LPM should be counted as available, hist=%v unavailable=%v", m.Hist, m.Unavailable)
+	}
+}
+
+func TestAnalyzeCountsObjdumpFlashDataSections(t *testing.T) {
+	lines := asm.ParseObjdump(`
+x.o:     file format elf32-avr
+
+Sections:
+Idx Name          Size      VMA       LMA       File off  Algn
+  0 .text         00000002  00000000  00000000  00000034  2**0
+                  CONTENTS, ALLOC, LOAD, READONLY, CODE
+  1 .rodata       00000006  00000000  00000000  00000036  2**0
+                  CONTENTS, ALLOC, LOAD, READONLY, DATA
+  2 .bss          00000003  00000000  00000000  0000003c  2**0
+                  ALLOC
+
+Disassembly of section .text:
+
+00000000 <f>:
+   0:	00 00       	nop
+`)
+	res := analyze.Analyze(lines, attiny3217)
+	if res.File.FlashWords != 1 || res.File.FlashDataBytes != 6 || res.File.FlashBytes() != 8 {
+		t.Fatalf("flash words/data/bytes = %d/%d/%d, want 1/6/8", res.File.FlashWords, res.File.FlashDataBytes, res.File.FlashBytes())
+	}
+	if res.SRAMStatic != 3 {
+		t.Fatalf("static SRAM = %d, want 3", res.SRAMStatic)
+	}
+}

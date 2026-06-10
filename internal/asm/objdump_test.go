@@ -16,6 +16,8 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, ALLOC, LOAD, DATA
   2 .bss          00000020  00000000  00000000  00000046  2**0
                   ALLOC
+  3 .rodata       00000004  00000000  00000000  00000046  2**0
+                  CONTENTS, ALLOC, LOAD, READONLY, DATA
 
 Disassembly of section .text:
 
@@ -100,19 +102,26 @@ func TestParseObjdumpLabelsAndComments(t *testing.T) {
 func TestParseObjdumpSectionSizes(t *testing.T) {
 	lines := ParseObjdump(sampleObjdump)
 
-	// .bss (0x20) must surface as a 32-byte .space directive; .data (size 0)
-	// and .text must not produce data directives.
-	var bss int
+	// .bss (0x20) and .rodata (0x04) must surface as .space directives; .data
+	// size 0 and .text must not produce data directives.
+	var bss, rodata int
 	for _, ln := range lines {
 		if ln.Directive == ".space" {
-			if ln.Section != ".bss" {
-				t.Errorf(".space emitted for section %q, want .bss", ln.Section)
-			}
 			n, _ := DataBytes(ln.Directive, ln.DirectiveArgs)
-			bss += n
+			switch ln.Section {
+			case ".bss":
+				bss += n
+			case ".rodata":
+				rodata += n
+			default:
+				t.Errorf(".space emitted for unexpected section %q", ln.Section)
+			}
 		}
 	}
 	if bss != 32 {
 		t.Errorf("static SRAM from sections = %d, want 32", bss)
+	}
+	if rodata != 4 {
+		t.Errorf("flash data from sections = %d, want 4", rodata)
 	}
 }

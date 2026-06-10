@@ -84,7 +84,8 @@ func TestAvailable(t *testing.T) {
 		{"BREAK", isa.VarAVRrc, 2, 1, true},
 		{"EICALL", isa.VarAVRxt, 2, 32, false}, // AVRxt only for >128 KB parts
 		{"EICALL", isa.VarAVRxt, 3, 256, true},
-		{"EICALL", isa.VarAVRePlus, 2, 64, true},
+		{"EICALL", isa.VarAVRePlus, 2, 64, false},
+		{"EICALL", isa.VarAVRePlus, 3, 256, true},
 		{"DES", isa.VarAVRxm, 2, 64, true},
 		{"DES", isa.VarAVRxt, 2, 32, false},
 	}
@@ -114,7 +115,7 @@ func TestAvailableOnTarget(t *testing.T) {
 		{"avr128da48", "ELPM", true},
 		{"avr128da48", "EICALL", false},
 		{"avr64da48", "ELPM", false},
-		{"attiny11", "LPM", false},
+		{"attiny11", "LPM", true},
 		{"attiny26", "CALL", true},
 		{"attiny40", "BREAK", true},
 		{"attiny10", "BREAK", false},
@@ -127,6 +128,19 @@ func TestAvailableOnTarget(t *testing.T) {
 		if got := isa.AvailableOnTarget(c.mn, d.Variant, d.PCBytes, d.FlashKB, d.Missing); got != c.want {
 			t.Errorf("AvailableOnTarget(%q on %s) = %t; want %t", c.mn, d.Name, got, c.want)
 		}
+	}
+}
+
+func TestAvailableOnTargetForm(t *testing.T) {
+	d, ok := isa.LookupDevice("attiny11")
+	if !ok {
+		t.Fatal("LookupDevice(attiny11) failed")
+	}
+	if isa.AvailableOnTargetForm("LD", "r16, X", d.Variant, d.PCBytes, d.FlashKB, d.Missing) {
+		t.Fatal("LD r16, X should be unavailable on ATtiny11")
+	}
+	if !isa.AvailableOnTargetForm("LPM", "", d.Variant, d.PCBytes, d.FlashKB, d.Missing) {
+		t.Fatal("LPM should be available on ATtiny11 per DS40002198C")
 	}
 }
 

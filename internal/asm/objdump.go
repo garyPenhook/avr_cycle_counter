@@ -60,6 +60,11 @@ func isDataSectionName(name string) bool {
 		strings.HasPrefix(name, ".noinit")
 }
 
+func isFlashDataSectionName(name string) bool {
+	return strings.HasPrefix(name, ".rodata") ||
+		strings.HasPrefix(name, ".progmem")
+}
+
 // LoadFile reads path and parses it the right way: an ELF object/executable is
 // disassembled with objdumpBin; an Intel-HEX file likewise; text that already
 // looks like objdump output is parsed as disassembly; anything else is treated
@@ -168,7 +173,7 @@ func ParseObjdump(src string) []*Line {
 		if inHeaders {
 			if m := reObjHeader.FindStringSubmatch(raw); m != nil {
 				name := m[1]
-				if sz, err := strconv.ParseInt(m[2], 16, 64); err == nil && sz > 0 && isDataSectionName(name) {
+				if sz, err := strconv.ParseInt(m[2], 16, 64); err == nil && sz > 0 && (isDataSectionName(name) || isFlashDataSectionName(name)) {
 					out = append(out, &Line{
 						Num: num, Raw: raw, Section: name,
 						Directive: ".space", DirectiveArgs: strconv.FormatInt(sz, 10),

@@ -70,7 +70,7 @@ var (
 	missCallJmpElpmEijEic   = NewMissingSet("CALL", "JMP", "ELPM", "EIJMP", "EICALL")
 	missModernXTCallGroup   = NewMissingSet("CALL", "JMP", "ELPM", "SPM", "SPM Z+", "EIJMP", "EICALL")
 	missModernXTNoCallGroup = NewMissingSet("ELPM", "SPM", "SPM Z+", "EIJMP", "EICALL")
-	missTiny11Family        = NewMissingSet("BREAK", "LPM", "LPM Z+", "ADIW", "SBIW", "IJMP", "ICALL", "LD X", "LD Y", "LD -Z", "LD Z+", "LD")
+	missTiny11Family        = NewMissingSet("BREAK", "ADIW", "SBIW", "IJMP", "ICALL", "LD X", "LD Y", "LD -Z", "LD Z+", "LD")
 	missXmegaRMW            = NewMissingSet("LAC", "LAT", "LAS", "XCH")
 )
 

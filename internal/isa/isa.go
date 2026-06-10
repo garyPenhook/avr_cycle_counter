@@ -270,8 +270,8 @@ func init() {
 	// Multiply / extended-range / ELPM: AVRe+ upward:
 	avail([]string{"MUL", "MULS", "MULSU", "FMUL", "FMULS", "FMULSU", "ELPM"},
 		VarAVRePlus, VarAVRxm, VarAVRxt)
-	// EICALL/EIJMP: AVRe+, AVRxm always; AVRxt only when flash > 128 KB
-	// (handled in Available via pcBytes):
+	// EICALL/EIJMP are extended-range instructions and only apply to targets
+	// with an extended program counter.
 	avail([]string{"EICALL", "EIJMP"}, VarAVRePlus, VarAVRxm)
 	// XMEGA-only:
 	avail([]string{"DES", "XCH", "LAC", "LAS", "LAT"}, VarAVRxm)
@@ -285,8 +285,10 @@ func Available(mnemonic string, v Variant, pcBytes, flashKB int) bool {
 	if v == VarAVRrc && (M == "CALL" || M == "JMP") {
 		return false
 	}
-	if v == VarAVRxt && (M == "EICALL" || M == "EIJMP") {
-		return pcBytes >= 3 // valid on AVRxt only for >128 KB devices
+	if M == "EICALL" || M == "EIJMP" {
+		if v == VarAVRxt || v == VarAVRePlus || v == VarAVRxm {
+			return pcBytes >= 3
+		}
 	}
 	set, ok := availability[M]
 	if !ok {
@@ -305,4 +307,32 @@ func AvailableOnTarget(mnemonic string, v Variant, pcBytes, flashKB int, missing
 		return false
 	}
 	return Available(M, v, pcBytes, flashKB)
+}
+
+// AvailableOnTargetForm is like AvailableOnTarget, but also considers
+// operand-qualified missing-instruction entries from Appendix A such as
+// "LD X" or "SPM Z+".
+func AvailableOnTargetForm(mnemonic, operands string, v Variant, pcBytes, flashKB int, missing MissingSet) bool {
+	M := strings.ToUpper(strings.TrimSpace(mnemonic))
+	if missing != nil {
+		if missing[M] || missing[formKey(M, operands)] {
+			return false
+		}
+	}
+	return Available(M, v, pcBytes, flashKB)
+}
+
+func formKey(mnemonic, operands string) string {
+	ops := strings.ToUpper(strings.TrimSpace(operands))
+	switch mnemonic {
+	case "LD":
+		if _, src, ok := strings.Cut(ops, ","); ok {
+			return mnemonic + " " + strings.TrimSpace(src)
+		}
+	case "SPM", "LPM", "ELPM":
+		if ops != "" {
+			return mnemonic + " " + strings.Fields(ops)[0]
+		}
+	}
+	return ""
 }

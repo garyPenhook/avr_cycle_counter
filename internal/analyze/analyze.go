@@ -144,7 +144,7 @@ func nextInstrWordCount(lines []*asm.Line, idx int, t Target) (int, bool) {
 			continue
 		}
 		info, ok := isa.Lookup(ln.Mnemonic)
-		if !ok || !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
+		if !ok || !isa.AvailableOnTargetForm(ln.Mnemonic, ln.Operands, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 			return 0, false
 		}
 		return info.WordCount(t.Variant), true
@@ -226,7 +226,7 @@ func skipTargetIndex(lines []*asm.Line, idx int) int {
 
 func modeledCycles(ln *asm.Line, t Target) (isa.CC, bool) {
 	info, ok := isa.Lookup(ln.Mnemonic)
-	if !ok || !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
+	if !ok || !isa.AvailableOnTargetForm(ln.Mnemonic, ln.Operands, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 		return isa.CC{}, false
 	}
 	return info.Cycles(t.Variant, t.PCBytes)
@@ -508,7 +508,7 @@ func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool,
 			continue
 		}
 		info, ok := isa.Lookup(ln.Mnemonic)
-		if !ok || !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
+		if !ok || !isa.AvailableOnTargetForm(ln.Mnemonic, ln.Operands, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 			continue
 		}
 		switch info.Mnemonic {
@@ -650,7 +650,7 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 			m.Unknown[ln.Mnemonic]++
 			continue
 		}
-		if !isa.AvailableOnTarget(ln.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
+		if !isa.AvailableOnTargetForm(ln.Mnemonic, ln.Operands, t.Variant, t.PCBytes, t.FlashKB, t.Missing) {
 			m.Unavailable[info.Mnemonic]++
 			continue
 		}
