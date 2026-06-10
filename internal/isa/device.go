@@ -1,5 +1,7 @@
 package isa
 
+//go:generate go run ../../cmd/gen-avr-device-db -out device_gen.go
+
 import (
 	"regexp"
 	"sort"
@@ -123,92 +125,10 @@ var familyFallbacks = []deviceFamily{
 	{regexp.MustCompile(`^ATTINY40$`), VarAVRrc, 2, kb(4), noneMissing},
 }
 
-// devices is a curated lookup seeded from the manual's device tables. It is not
-// exhaustive — any AVR can still be analyzed by passing -core (and -pc for
-// >128 KB parts) directly.
-var devices = map[string]Device{}
-
-func reg(v Variant, pc, flashKB int, names ...string) {
-	regMissing(v, pc, flashKB, nil, names...)
-}
-
-func regMissing(v Variant, pc, flashKB int, missing MissingSet, names ...string) {
-	for _, n := range names {
-		N := strings.ToUpper(n)
-		devices[N] = Device{Name: N, Variant: v, PCBytes: pc, FlashKB: flashKB, Missing: missing.Clone()}
-	}
-}
-
-func init() {
-	// tinyAVR 0/1/2-series — AVRxt, 16-bit PC. Flash = leading number (KiB).
-	regMissing(VarAVRxt, 2, 2, missModernXTCallGroup,
-		"ATtiny202", "ATtiny204", "ATtiny212", "ATtiny214")
-	regMissing(VarAVRxt, 2, 4, missModernXTCallGroup,
-		"ATtiny402", "ATtiny404", "ATtiny406", "ATtiny412", "ATtiny414",
-		"ATtiny416", "ATtiny417", "ATtiny424", "ATtiny426", "ATtiny427")
-	regMissing(VarAVRxt, 2, 8, missModernXTCallGroup,
-		"ATtiny804", "ATtiny806", "ATtiny807", "ATtiny814", "ATtiny816", "ATtiny817",
-		"ATtiny824", "ATtiny826", "ATtiny827")
-	regMissing(VarAVRxt, 2, 16, missModernXTNoCallGroup,
-		"ATtiny1604", "ATtiny1606", "ATtiny1607",
-		"ATtiny1614", "ATtiny1616", "ATtiny1617",
-		"ATtiny1624", "ATtiny1626", "ATtiny1627")
-	regMissing(VarAVRxt, 2, 32, missModernXTNoCallGroup,
-		"ATtiny3216", "ATtiny3217", "ATtiny3224", "ATtiny3226", "ATtiny3227")
-	// megaAVR 0-series — AVRxt, 16-bit PC.
-	regMissing(VarAVRxt, 2, 8, missModernXTCallGroup, "ATmega808", "ATmega809")
-	regMissing(VarAVRxt, 2, 16, missModernXTNoCallGroup, "ATmega1608", "ATmega1609")
-	regMissing(VarAVRxt, 2, 32, missModernXTNoCallGroup, "ATmega3208", "ATmega3209")
-	regMissing(VarAVRxt, 2, 48, missModernXTNoCallGroup, "ATmega4808", "ATmega4809")
-
-	// Classic megaAVR / AT90 — AVRe+, 16-bit PC.
-	regMissing(VarAVRePlus, 2, 4, missCallJmpElpmEijEic, "ATmega48")
-	regMissing(VarAVRePlus, 2, 8, NewMissingSet("BREAK", "CALL", "JMP", "ELPM", "EIJMP", "EICALL"), "ATmega8")
-	regMissing(VarAVRePlus, 2, 8, missCallJmpElpmEijEic, "ATmega88")
-	regMissing(VarAVRePlus, 2, 16, missElpmEijmpEicall,
-		"ATmega16", "ATmega162", "ATmega164P", "ATmega168",
-		"ATmega16U4", "ATmega16U2")
-	regMissing(VarAVRePlus, 2, 32, missElpmEijmpEicall,
-		"ATmega32", "ATmega324P", "ATmega328", "ATmega328P", "ATmega328PB",
-		"ATmega32U4", "ATmega32U2")
-	regMissing(VarAVRePlus, 2, 64, missElpmEijmpEicall, "ATmega64", "ATmega644", "ATmega644P")
-	regMissing(VarAVRePlus, 2, 128, missEijmpEicall,
-		"ATmega128", "ATmega128A", "ATmega1284P", "ATmega1280", "ATmega1281",
-		"AT90USB1286", "AT90USB1287", "AT90CAN128")
-	// 256 KB classic megaAVR — AVRe+, 22-bit PC.
-	reg(VarAVRePlus, 3, 256,
-		"ATmega2560", "ATmega2561", "ATmega2564RFR2", "ATmega256RFR2")
-
-	// Classic tinyAVR — AVRe (no multiply), 16-bit PC.
-	regMissing(VarAVRe, 2, 1, missCallJmpElpm, "ATtiny13", "ATtiny13A")
-	regMissing(VarAVRe, 2, 2, missCallJmpElpm, "ATtiny24", "ATtiny25", "ATtiny261", "ATtiny2313")
-	regMissing(VarAVRe, 2, 4, missCallJmpElpm, "ATtiny44", "ATtiny45", "ATtiny461", "ATtiny4313", "ATtiny48")
-	regMissing(VarAVRe, 2, 8, missCallJmpElpm, "ATtiny84", "ATtiny861", "ATtiny88")
-	reg(VarAVRe, 2, 16, "ATtiny167", "ATtiny1634")
-	// Earliest tinyAVR — original AVR core.
-	regMissing(VarAVR, 2, 1, missTiny11Family, "ATtiny11", "ATtiny12", "ATtiny15")
-	regMissing(VarAVR, 2, 2, missBreakOnly, "ATtiny26")
-
-	// Reduced Core tinyAVR — AVRrc, 16-bit PC.
-	regMissing(VarAVRrc, 2, 1, missBreakOnly, "ATtiny4", "ATtiny5", "ATtiny9", "ATtiny10",
-		"ATtiny102", "ATtiny104")
-	regMissing(VarAVRrc, 2, 2, missBreakOnly, "ATtiny20")
-	reg(VarAVRrc, 2, 4, "ATtiny40")
-
-	// XMEGA — AVRxm. Parts up to 128 KB use a 16-bit PC; 256/384 KB use 22-bit.
-	regMissing(VarAVRxm, 2, 16, missElpmEijmpEicall, "ATxmega16A4U", "ATxmega16C4", "ATxmega16E5")
-	regMissing(VarAVRxm, 2, 16, NewMissingSet("LAC", "LAT", "LAS", "XCH", "ELPM", "EIJMP", "EICALL"), "ATxmega16D4")
-	regMissing(VarAVRxm, 2, 32, missElpmEijmpEicall, "ATxmega32A4U", "ATxmega32C4", "ATxmega32E5")
-	regMissing(VarAVRxm, 2, 32, NewMissingSet("LAC", "LAT", "LAS", "XCH", "ELPM", "EIJMP", "EICALL"), "ATxmega32C3", "ATxmega32D4")
-	regMissing(VarAVRxm, 2, 64, missEijmpEicall, "ATxmega64A3U", "ATxmega64A4U", "ATxmega64B1")
-	regMissing(VarAVRxm, 2, 64, NewMissingSet("LAC", "LAT", "LAS", "XCH", "EIJMP", "EICALL"), "ATxmega64A1")
-	reg(VarAVRxm, 2, 128, "ATxmega128A1U", "ATxmega128A3U", "ATxmega128A4U")
-	regMissing(VarAVRxm, 2, 128, missXmegaRMW, "ATxmega128D3")
-	reg(VarAVRxm, 3, 192, "ATxmega192A3U", "ATxmega192C3")
-	reg(VarAVRxm, 3, 256, "ATxmega256A3U", "ATxmega256A3BU", "ATxmega256C3")
-	reg(VarAVRxm, 3, 384, "ATxmega384C3")
-	regMissing(VarAVRxm, 3, 384, missXmegaRMW, "ATxmega384D3")
-}
+// devices is the exact-device database generated from Appendix A of the
+// instruction-set manual. Family fallbacks below still cover common suffix
+// variants that are convenient to resolve without enumerating every package.
+var devices = generatedDevices
 
 // Devices returns the curated part-number table sorted by name. It is not
 // exhaustive — parts matched only by a family fallback are not listed here.

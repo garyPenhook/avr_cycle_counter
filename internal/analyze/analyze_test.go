@@ -307,6 +307,28 @@ done:
 	}
 }
 
+func TestBranchModeBestWorstPruneAcyclicCFG(t *testing.T) {
+	src := `start:
+	brne heavy
+	ret
+heavy:
+	push r16
+	pop r16
+	ret
+`
+	lines := asm.Parse(src)
+
+	best := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchBest).File
+	if best.InstrCount != 2 || best.CyclesMin != 5 || best.CyclesMax != 5 {
+		t.Fatalf("best = instr %d cycles %d-%d, want instr 2 cycles 5", best.InstrCount, best.CyclesMin, best.CyclesMax)
+	}
+
+	worst := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchWorst).File
+	if worst.InstrCount != 4 || worst.CyclesMin != 9 || worst.CyclesMax != 9 {
+		t.Fatalf("worst = instr %d cycles %d-%d, want instr 4 cycles 9", worst.InstrCount, worst.CyclesMin, worst.CyclesMax)
+	}
+}
+
 // In not-taken mode the pushes on the unreachable (taken) path must not count
 // toward peak stack, matching the pruned instruction/cycle accounting.
 func TestStackPeakRespectsBranchPruning(t *testing.T) {
@@ -406,6 +428,51 @@ func TestRecursiveCallDoesNotLoopForever(t *testing.T) {
 	m, err := analyze.SymbolMetrics(asm.Parse(src), "f", 1, attiny3217)
 	if err != nil {
 		t.Fatalf("SymbolMetrics: %v", err)
+	}
+	if m.PeakStackBytes != 3 {
+		t.Fatalf("peak stack = %d, want 3", m.PeakStackBytes)
+	}
+}
+
+func TestLocalLabelCallIncludesCalleeStack(t *testing.T) {
+	src := `f:
+	call .Lhelper
+	ret
+.Lhelper:
+	push r16
+	push r17
+	pop r17
+	pop r16
+	ret
+`
+	m, err := analyze.SymbolMetrics(asm.Parse(src), "f", 1, attiny3217)
+	if err != nil {
+		t.Fatalf("SymbolMetrics: %v", err)
+	}
+	if m.PeakPushBytes != 2 {
+		t.Fatalf("peak push bytes = %d, want 2", m.PeakPushBytes)
+	}
+	if m.PeakCallBytes != 2 {
+		t.Fatalf("peak call bytes = %d, want 2", m.PeakCallBytes)
+	}
+	if m.PeakStackBytes != 4 {
+		t.Fatalf("peak stack = %d, want 4", m.PeakStackBytes)
+	}
+}
+
+func TestIndirectCallCountsAsUnresolvedStackEdge(t *testing.T) {
+	src := `f:
+	push r16
+	icall
+	pop r16
+	ret
+`
+	m, err := analyze.SymbolMetrics(asm.Parse(src), "f", 1, attiny3217)
+	if err != nil {
+		t.Fatalf("SymbolMetrics: %v", err)
+	}
+	if m.UnresolvedCalls != 1 {
+		t.Fatalf("unresolved calls = %d, want 1", m.UnresolvedCalls)
 	}
 	if m.PeakStackBytes != 3 {
 		t.Fatalf("peak stack = %d, want 3", m.PeakStackBytes)

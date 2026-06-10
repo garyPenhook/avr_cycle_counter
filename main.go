@@ -722,6 +722,9 @@ func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float
 			if m.PeakPushBytes > 0 || m.PeakCallBytes > 0 {
 				fmt.Fprintf(w, ", %d B push depth + %d B call-chain overhead at deepest call site", m.PeakPushBytes, m.PeakCallBytes)
 			}
+			if m.UnresolvedCalls > 0 {
+				fmt.Fprintf(w, ", %d unresolved/indirect", m.UnresolvedCalls)
+			}
 		}
 		fmt.Fprintln(w)
 	}

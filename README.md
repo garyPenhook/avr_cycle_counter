@@ -240,9 +240,10 @@ Non-text formats do not support `-v`.
 `best` and `worst` force each conditional branch/skip to its cheaper or more
 expensive timing; `taken` and `not-taken` force the taken/fallthrough timing of
 conditional instructions. `taken` / `not-taken` now also follow direct,
-resolvable branches/jumps and stop on `RET` or a repeated instruction; `best`
-and `worst` still constrain **timing only** and do not prune the span with a
-full CFG walk.
+resolvable branches/jumps and stop on `RET` or a repeated instruction. On
+acyclic control flow, `best` / `worst` now also prune to the cheaper or more
+expensive downstream path; on cyclic spans they fall back to timing-only
+selection rather than pretending to prove an unbounded loop path.
 
 `-rank N` surfaces the top `N` costly top-level symbol spans and annotated
 regions in the current file. `-rank-by cycles` sorts by worst-case cycle total,
@@ -303,9 +304,9 @@ Instructions are classified per target and flagged when they need attention:
 dependent, e.g. `SPM`), **⚠ unrecognised** (not in the ISA table — check syntax).
 
 If you select `-branches best|worst|taken|not-taken`, the report header records
-that mode. `best` / `worst` change only conditional timing. `taken` /
-`not-taken` also prune the executed path for direct resolvable branches/jumps,
-but they still are not a full control-flow-graph proof.
+that mode. `taken` / `not-taken` prune the executed path for direct resolvable
+branches/jumps. `best` / `worst` do the same on acyclic spans, but they still
+are not a full control-flow-graph proof.
 
 ### Exit codes
 
@@ -532,14 +533,13 @@ modeled, `⚠` unrecognised) — see [Reading the report](#reading-the-report).
 
 - It is a listing analyser, not a simulator: it does not follow calls or
   branches, so loop totals come from your `iter=` annotation and cycle ranges
-  are bounds, not one executed path. `-branches taken|not-taken` can now follow
-  direct resolvable branches/jumps and stop at `RET` or a repeated instruction,
-  but this is still a bounded path-pruning heuristic rather than full CFG
-  traversal.
+  are bounds, not one executed path. The pruned branch modes follow direct
+  resolvable control flow and stop at `RET` or a repeated instruction, but this
+  is still a bounded path-selection heuristic rather than a full CFG proof.
 - Call-stack reporting now follows direct intra-file calls into known top-level
-  symbols, so a caller can include callee-local stack depth. It still does not
-  compute a full interprocedural worst-case over arbitrary call graphs, and
-  recursion/cycles are truncated rather than expanded indefinitely.
+  symbols and local labels, and it flags unresolved/indirect call edges
+  separately. Recursive/cyclic call graphs are still truncated rather than
+  expanded indefinitely.
 - `LD`/`ST`/`LDD` addressing-mode timing on AVRxm and AVRrc is given as a range
   (the manual splits it by mode); AVRe and AVRxt are exact.
 - In **source** mode, the C preprocessor is applied only with `-cpp`; GNU-as
@@ -553,10 +553,12 @@ modeled, `⚠` unrecognised) — see [Reading the report](#reading-the-report).
 ```
 main.go                  CLI, target selection, reports, JSON, comparison
 internal/isa/isa.go      per-core instruction timing + availability (DS40002198C)
-internal/isa/device.go   part-number → core / PC-width map
+internal/isa/device.go   device helpers + family fallbacks (`go generate` entrypoint)
+internal/isa/device_gen.go generated exact-device database from Appendix A
 internal/asm/asm.go      .S parser: lines, sections, data sizes, annotations
 internal/asm/objdump.go  binary front end: ELF/.o/.hex via avr-objdump
 internal/asm/cpp.go      C-preprocessor front end (-cpp) via avr-gcc -E
 internal/analyze/        instruction/cycle/flash/SRAM accounting per target
 examples/                delay.S, scale_mul.S, scale_shift.S
+cmd/gen-avr-device-db/   Appendix-A PDF/text → generated device database
 ```
