@@ -79,9 +79,13 @@ var (
 // Each entry is flash-homogeneous (constant kb) or derives flash from the part
 // number (firstNum), and may also derive device-specific missing instructions.
 var familyFallbacks = []deviceFamily{
-	// Modern AVR Dx/Ex/Du/Sd naming (≥16 KB), 16-bit PC / AVRxt core. The
+	// AVR SD (functional safety) parts keep ELPM at every flash size: Appendix A
+	// lists only EIJMP/EICALL as missing (DS40002198C Table 7-4).
+	{regexp.MustCompile(`^AVR\d+SD\d*$`), VarAVRxt, 2, firstNum, exactMissing("EIJMP", "EICALL")},
+
+	// Modern AVR Dx/Ex/Du naming (≥16 KB), 16-bit PC / AVRxt core. The
 	// leading number is the flash size in KiB.
-	{regexp.MustCompile(`^AVR\d+(DA|DB|DD|DU|EA|EB|SD)\d*$`), VarAVRxt, 2, firstNum,
+	{regexp.MustCompile(`^AVR\d+(DA|DB|DD|DU|EA|EB)\d*$`), VarAVRxt, 2, firstNum,
 		missingByFlash(map[int]MissingSet{
 			16:  missElpmEijmpEicall,
 			32:  missElpmEijmpEicall,

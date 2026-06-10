@@ -184,6 +184,19 @@ func TestFamilies(t *testing.T) {
 		isa.AvailableOnTarget("CALL", t85.Variant, t85.PCBytes, t85.FlashKB, t85.Missing) {
 		t.Errorf("attiny85 = %+v; want MOVW but no CALL", t85)
 	}
+	// AVR SD parts keep ELPM: Appendix A (DS40002198C Table 7-4) lists only
+	// EIJMP/EICALL as missing, unlike same-size DA/DB/DD/DU/EA/EB parts.
+	sd, ok := isa.LookupDevice("avr64sd48")
+	if !ok || sd.Variant != isa.VarAVRxt || sd.FlashKB != 64 ||
+		!isa.AvailableOnTarget("ELPM", sd.Variant, sd.PCBytes, sd.FlashKB, sd.Missing) ||
+		isa.AvailableOnTarget("EICALL", sd.Variant, sd.PCBytes, sd.FlashKB, sd.Missing) {
+		t.Errorf("avr64sd48 = %+v,%t; want AVRxt/64KB with ELPM but no EICALL", sd, ok)
+	}
+	// A same-size EA part still lacks ELPM, proving the SD rule is separate.
+	ea, ok := isa.LookupDevice("avr64ea48")
+	if !ok || isa.AvailableOnTarget("ELPM", ea.Variant, ea.PCBytes, ea.FlashKB, ea.Missing) {
+		t.Errorf("avr64ea48 = %+v,%t; want ELPM unavailable", ea, ok)
+	}
 }
 
 func TestWordCount(t *testing.T) {
