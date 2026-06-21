@@ -124,6 +124,24 @@ for the OS you run on — there is nothing OS-specific in `cyclecount` itself.
 
 ## Install
 
+### Prebuilt binary (recommended)
+
+Grab the latest release from the
+[releases page](https://github.com/garyPenhook/avr_cycle_counter/releases).
+The current release is **v0.2.3**, with builds for linux, macOS (darwin), and
+windows on amd64/arm64 (no windows/arm64). For example, Linux x86-64:
+
+```sh
+curl -fL https://github.com/garyPenhook/avr_cycle_counter/releases/download/v0.2.3/cyclecount-linux-amd64.tar.gz | tar -xz
+./cyclecount -version          # prints: cyclecount 0.2.3
+```
+
+Swap `linux-amd64` for `linux-arm64`, `darwin-amd64`, `darwin-arm64`, or
+`windows-amd64` (a `.zip`) as needed. Verify your download against
+`checksums.txt` from the same release.
+
+### Build from source
+
 With a Go toolchain (**Go ≥ 1.26**, see `go.mod`), build from a checkout:
 
 ```sh
