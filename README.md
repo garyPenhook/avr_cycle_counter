@@ -181,7 +181,7 @@ cyclecount -mcu atmega328p -clock 16 examples/delay.S
 cyclecount -mcu atmega328p -v examples/delay.S
 
 # 4. focus on a hot loop and give its trip count
-cyclecount -from .L_inner -to .L_inner -iter 1000 examples/delay.S
+cyclecount -from .L_inner -to .L_inner_end -iter 1000 examples/delay.S
 
 # 5. analyze one function/symbol directly
 cyclecount -func delay_ticks examples/delay.S

@@ -7,7 +7,6 @@
 package asm
 
 import (
-	"bufio"
 	"os"
 	"strconv"
 	"strings"
@@ -51,13 +50,10 @@ func Parse(src string) []*Line {
 	section := ".text"
 	var out []*Line
 
-	sc := bufio.NewScanner(strings.NewReader(src))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	num := 0
-	for sc.Scan() {
-		num++
-		raw := sc.Text()
-		ln := &Line{Num: num, Raw: raw}
+	// Split on newlines directly rather than via bufio.Scanner, which silently
+	// truncates the source at the first token longer than its buffer.
+	for num, raw := range splitLines(src) {
+		ln := &Line{Num: num + 1, Raw: raw}
 
 		code, comment := splitComment(raw)
 		ln.Comment = strings.TrimSpace(comment)
@@ -71,11 +67,52 @@ func Parse(src string) []*Line {
 	return out
 }
 
-// stripBlockComments removes /* ... */ comments while preserving line count.
+// splitLines splits source into lines with the same semantics as a line
+// scanner: '\r' is stripped from line ends, and a trailing newline does not
+// yield a final empty line. Unlike bufio.Scanner it imposes no line-length cap.
+func splitLines(src string) []string {
+	if src == "" {
+		return nil
+	}
+	lines := strings.Split(src, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1] // drop the empty element after a trailing newline
+	}
+	for i := range lines {
+		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	}
+	return lines
+}
+
+// stripBlockComments removes /* ... */ comments while preserving line count. A
+// "/*" inside a double-quoted string or a line comment (';' or '//') does not
+// open a block comment, so e.g. .ascii "a/*b" and "; /* note" survive intact.
 func stripBlockComments(s string) string {
 	var b strings.Builder
+	inStr := false  // inside a double-quoted string literal
+	inLine := false // inside a ';' or '//' line comment
 	for i := 0; i < len(s); {
-		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
+		c := s[i]
+		switch {
+		case c == '\n':
+			inStr, inLine = false, false // neither spans a line break
+		case inLine:
+			// verbatim until end of line
+		case inStr:
+			if c == '\\' && i+1 < len(s) && s[i+1] != '\n' {
+				b.WriteByte(c)
+				b.WriteByte(s[i+1])
+				i += 2
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+		case c == '"':
+			inStr = true
+		case c == ';' || (c == '/' && i+1 < len(s) && s[i+1] == '/'):
+			inLine = true
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
 			i += 2
 			for i < len(s) && !(i+1 < len(s) && s[i] == '*' && s[i+1] == '/') {
 				if s[i] == '\n' {
@@ -86,7 +123,7 @@ func stripBlockComments(s string) string {
 			i += 2 // skip closing */
 			continue
 		}
-		b.WriteByte(s[i])
+		b.WriteByte(c)
 		i++
 	}
 	return b.String()
@@ -272,8 +309,30 @@ func DataBytes(directive, args string) (int, bool) {
 			}
 		}
 		return rep * size, true
+	case ".comm", ".lcomm":
+		// GNU as: .comm name, size[, align] / .lcomm name, size[, align].
+		// The reserved length is the second comma-separated field.
+		ps := strings.Split(a, ",")
+		if len(ps) < 2 {
+			return 0, false
+		}
+		if n, ok := firstInt(ps[1]); ok {
+			return n, true
+		}
 	}
 	return 0, false
+}
+
+// AllocatesBSS reports whether a directive reserves storage regardless of the
+// section in effect. GNU .comm/.lcomm declare common symbols that land in BSS
+// no matter which section is current, so callers must size them even outside a
+// recognized data section.
+func AllocatesBSS(directive string) bool {
+	switch strings.ToLower(strings.TrimSpace(directive)) {
+	case ".comm", ".lcomm":
+		return true
+	}
+	return false
 }
 
 func countItems(a string) int {

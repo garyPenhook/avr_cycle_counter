@@ -194,6 +194,20 @@ func TestResolveTargetsRejectsMixedMatrix(t *testing.T) {
 	}
 }
 
+func TestResolveTargetsRejectsMCUWithCore(t *testing.T) {
+	oldMCU, oldCore := *flMCU, *flCore
+	t.Cleanup(func() {
+		*flMCU, *flCore = oldMCU, oldCore
+	})
+
+	// A single -mcu combined with a single -core would build an invalid hybrid
+	// target (the part's real core silently overridden), so it must be rejected.
+	*flMCU, *flCore = "attiny3217", "avre"
+	if _, err := resolveTargets(); err == nil {
+		t.Fatal("expected -mcu + -core combination to be rejected")
+	}
+}
+
 func TestResolveTargetsRejectsCPPMultiMCU(t *testing.T) {
 	oldMCU, oldCore, oldCPP := *flMCU, *flCore, *flCPP
 	t.Cleanup(func() {

@@ -15,6 +15,7 @@ delay_ticks:
         sbiw    r24, 1          ; 2  — decrement 16-bit counter
         brne    .L_inner        ; 2 taken / 1 on exit
         ; @end inner
+.L_inner_end:
         ret
 
         .global toggle_pin

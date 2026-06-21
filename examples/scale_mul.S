@@ -1,5 +1,5 @@
 ; r24 = r24 * 10, using the AVRxt hardware multiplier.
-; Baseline for:  cyclecount examples/scale_shift.S -vs examples/scale_mul.S
+; Baseline for:  cyclecount -vs examples/scale_mul.S examples/scale_shift.S
 
         .section .text
         .global scale

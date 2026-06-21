@@ -242,14 +242,14 @@ func resolveTarget() (analyze.Target, error) {
 
 func resolveTargets() ([]analyze.Target, error) {
 	mcus, cores := csvList(*flMCU), csvList(*flCore)
-	if len(mcus) > 1 && len(cores) > 0 {
-		return nil, errors.New("comma-separated -mcu cannot be combined with -core; pick one target dimension")
+	if len(mcus) > 0 && len(cores) > 0 {
+		// A real part fixes its own core; overriding it would build an invalid
+		// hybrid target (e.g. ATtiny3217 forced onto AVRe). Pass -core alone to
+		// analyze a bare core, or -mcu alone to use the part's real core.
+		return nil, errors.New("-mcu and -core cannot be combined; -mcu already implies a core (pass -core alone for a bare core)")
 	}
 	if len(mcus) > 1 && *flCPP {
 		return nil, errors.New("-cpp cannot be combined with comma-separated -mcu; preprocess each target separately")
-	}
-	if len(cores) > 1 && len(mcus) > 0 {
-		return nil, errors.New("comma-separated -core cannot be combined with -mcu; pick one target dimension")
 	}
 	if len(mcus) > 1 {
 		ts := make([]analyze.Target, 0, len(mcus))
@@ -874,16 +874,6 @@ func cycleCell(m analyze.Metrics) string {
 		return fmt.Sprintf("%d", m.CyclesMin)
 	}
 	return fmt.Sprintf("%d-%d", m.CyclesMin, m.CyclesMax)
-}
-
-func scopeName(run analysisRun) string {
-	if run.Symbol != nil {
-		return run.Symbol.Name
-	}
-	if run.Range != nil {
-		return run.Range.Name
-	}
-	return run.Result.File.Name
 }
 
 func renderSingleCSV(w io.Writer, run analysisRun, path string) {
