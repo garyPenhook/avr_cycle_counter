@@ -111,6 +111,28 @@ tab:	.word 1, 2, 3
 	}
 }
 
+// .comm/.lcomm reserve BSS storage even while the .text section is in effect,
+// and must not be counted as inline flash data.
+func TestStaticSRAMComm(t *testing.T) {
+	src := `	.section .text
+	.global f
+f:
+	.comm buf, 32, 1
+	.lcomm scratch, 16
+	ret
+`
+	res := analyze.Analyze(asm.Parse(src), attiny3217)
+	if res.SRAMStatic != 48 {
+		t.Errorf("sram static = %d, want 48", res.SRAMStatic)
+	}
+	if res.Sections[".bss"] != 48 {
+		t.Errorf(".bss = %d, want 48", res.Sections[".bss"])
+	}
+	if got := res.File.FlashDataBytes; got != 0 {
+		t.Errorf("flash inline data = %d, want 0 (common symbols are SRAM, not flash)", got)
+	}
+}
+
 func TestAnalyzeExtractsTopLevelSymbols(t *testing.T) {
 	src := `first:
 	nop

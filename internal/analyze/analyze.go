@@ -636,7 +636,9 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 		executed = path.executed
 	}
 	for idx, ln := range lines {
-		if ln.Directive != "" {
+		if ln.Directive != "" && !asm.AllocatesBSS(ln.Directive) {
+			// .comm/.lcomm reserve SRAM, not flash, so they never count here even
+			// when they appear in a flash section.
 			if b, ok := asm.DataBytes(ln.Directive, ln.DirectiveArgs); ok && isFlashSection(ln.Section) {
 				m.FlashDataBytes += b
 			}
@@ -706,10 +708,18 @@ func AnalyzeMode(lines []*asm.Line, t Target, mode BranchMode) Result {
 		if ln.Directive == "" {
 			continue
 		}
-		if b, ok := asm.DataBytes(ln.Directive, ln.DirectiveArgs); ok && isDataSection(ln.Section) {
-			res.SRAMStatic += b
-			res.Sections[ln.Section] += b
+		b, ok := asm.DataBytes(ln.Directive, ln.DirectiveArgs)
+		if !ok {
+			continue
 		}
+		sec := ln.Section
+		if asm.AllocatesBSS(ln.Directive) {
+			sec = ".bss" // .comm/.lcomm reserve BSS storage regardless of the current section
+		} else if !isDataSection(sec) {
+			continue
+		}
+		res.SRAMStatic += b
+		res.Sections[sec] += b
 	}
 	res.Regions = extractRegions(lines, t, mode, symbols)
 	res.Symbols = extractSymbols(lines, t, mode, symbols)

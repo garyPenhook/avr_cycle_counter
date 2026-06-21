@@ -63,15 +63,8 @@ func missingByFlash(kbToMissing map[int]MissingSet) func(string) MissingSet {
 }
 
 var (
-	missBreakOnly           = NewMissingSet("BREAK")
-	missCallJmpElpm         = NewMissingSet("CALL", "JMP", "ELPM")
-	missElpmEijmpEicall     = NewMissingSet("ELPM", "EIJMP", "EICALL")
-	missEijmpEicall         = NewMissingSet("EIJMP", "EICALL")
-	missCallJmpElpmEijEic   = NewMissingSet("CALL", "JMP", "ELPM", "EIJMP", "EICALL")
-	missModernXTCallGroup   = NewMissingSet("CALL", "JMP", "ELPM", "SPM", "SPM Z+", "EIJMP", "EICALL")
-	missModernXTNoCallGroup = NewMissingSet("ELPM", "SPM", "SPM Z+", "EIJMP", "EICALL")
-	missTiny11Family        = NewMissingSet("BREAK", "ADIW", "SBIW", "IJMP", "ICALL", "LD X", "LD Y", "LD -Z", "LD Z+", "LD")
-	missXmegaRMW            = NewMissingSet("LAC", "LAT", "LAS", "XCH")
+	missElpmEijmpEicall = NewMissingSet("ELPM", "EIJMP", "EICALL")
+	missEijmpEicall     = NewMissingSet("EIJMP", "EICALL")
 )
 
 // familyFallbacks cover common AVR naming families so routine suffix variants

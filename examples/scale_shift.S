@@ -1,6 +1,6 @@
 ; r24 = r24 * 10 = (r24<<3) + (r24<<1), shift-and-add, no multiplier, no R1 fixup.
 ; Compare against the multiply version:
-;   cyclecount examples/scale_shift.S -vs examples/scale_mul.S
+;   cyclecount -vs examples/scale_mul.S examples/scale_shift.S
 
         .section .text
         .global scale
