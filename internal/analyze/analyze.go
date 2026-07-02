@@ -56,6 +56,18 @@ func ParseBranchMode(s string) (BranchMode, bool) {
 	}
 }
 
+type BranchPlan struct {
+	Decisions map[string]bool
+	Trips     map[string]int
+	MaxVisits int
+}
+
+type Options struct {
+	BranchMode  BranchMode
+	BranchPlan  BranchPlan
+	CallTargets map[string]string
+}
+
 // Target is the AVR device being analyzed.
 type Target struct {
 	Name    string // display name (device part number or core)
@@ -88,6 +100,7 @@ type Metrics struct {
 	Pops            int
 	Calls           int
 	UnresolvedCalls int
+	RecursiveCalls  int
 	CallBytes       int // PC width: stack cost of each call's return address
 	Hist            map[string]int
 	Unknown         map[string]int // not in the ISA table at all
@@ -107,6 +120,7 @@ type Result struct {
 	Sections   map[string]int
 	Regions    []Metrics
 	Symbols    []Metrics
+	Warnings   []string // non-fatal issues: malformed @begin/@end regions, etc.
 }
 
 func isFlashSection(sec string) bool {
@@ -203,8 +217,9 @@ func targetIndex(lines []*asm.Line, idx int, operands, comment string, labelInde
 }
 
 type pathState struct {
-	executed map[int]bool
-	taken    map[int]bool
+	counts      map[int]int
+	taken       map[int]bool
+	cycleTotals map[int]int
 }
 
 func nextInstructionAtOrAfter(lines []*asm.Line, idx int) int {
@@ -232,18 +247,31 @@ func modeledCycles(ln *asm.Line, t Target) (isa.CC, bool) {
 	return info.Cycles(t.Variant, t.PCBytes)
 }
 
-func pathStateFor(lines []*asm.Line, t Target, mode BranchMode) *pathState {
-	if mode == BranchBounds {
+func pathStateFor(lines []*asm.Line, t Target, opts Options) *pathState {
+	mode := opts.BranchMode
+	plan := opts.BranchPlan
+	if mode == BranchBounds && len(plan.Decisions) == 0 && len(plan.Trips) == 0 && plan.MaxVisits <= 1 {
 		return nil
 	}
 	labelIndex := map[string]int{}
+	lineLabels := map[int]string{}
+	lastLabel := ""
 	for i, ln := range lines {
 		if ln.Label != "" {
 			labelIndex[ln.Label] = i
+			lastLabel = ln.Label
+		}
+		lineLabels[i] = lastLabel
+	}
+	maxVisits := max(plan.MaxVisits, 1)
+	for _, trip := range plan.Trips {
+		if trip > maxVisits {
+			maxVisits = trip
 		}
 	}
 
 	decisions := map[int]bool{}
+	tripVisits := map[string]int{}
 	memo := map[int]int{}
 	visiting := map[int]bool{}
 	sawCycle := false
@@ -289,38 +317,47 @@ func pathStateFor(lines []*asm.Line, t Target, mode BranchMode) *pathState {
 		case isCondBranch(ln.Mnemonic):
 			fallIdx := nextInstructionIndex(lines, idx)
 			target, ok := targetIndex(lines, idx, ln.Operands, ln.Comment, labelIndex)
-			switch mode {
-			case BranchTaken:
-				decisions[idx] = true
-				if ok {
+			if planned, plannedOK := branchPlanDecision(plan, nil, lines, idx, target, ok, lineLabels); plannedOK {
+				decisions[idx] = planned
+				if planned && ok {
 					base = cc.Max + costFrom(target)
 				} else {
-					base = cc.Max
+					base = cc.Min + costFrom(fallIdx)
 				}
-			case BranchNotTaken:
-				decisions[idx] = false
-				base = cc.Min + costFrom(fallIdx)
-			case BranchBest, BranchWorst:
-				bestFall := cc.Min + costFrom(fallIdx)
-				bestTake := -1
-				if ok {
-					bestTake = cc.Max + costFrom(target)
-				}
-				take := ok
-				if mode == BranchBest {
-					take = ok && bestTake < bestFall
-					base = bestFall
-					if take {
-						base = bestTake
+			} else {
+				switch mode {
+				case BranchTaken:
+					decisions[idx] = true
+					if ok {
+						base = cc.Max + costFrom(target)
+					} else {
+						base = cc.Max
 					}
-				} else {
-					take = ok && bestTake >= bestFall
-					base = bestFall
-					if take {
-						base = bestTake
+				case BranchNotTaken:
+					decisions[idx] = false
+					base = cc.Min + costFrom(fallIdx)
+				case BranchBest, BranchWorst:
+					bestFall := cc.Min + costFrom(fallIdx)
+					bestTake := -1
+					if ok {
+						bestTake = cc.Max + costFrom(target)
 					}
+					take := ok
+					if mode == BranchBest {
+						take = ok && bestTake < bestFall
+						base = bestFall
+						if take {
+							base = bestTake
+						}
+					} else {
+						take = ok && bestTake >= bestFall
+						base = bestFall
+						if take {
+							base = bestTake
+						}
+					}
+					decisions[idx] = take
 				}
-				decisions[idx] = take
 			}
 		case isSkip(ln.Mnemonic):
 			fallIdx := nextInstructionIndex(lines, idx)
@@ -329,31 +366,40 @@ func pathStateFor(lines []*asm.Line, t Target, mode BranchMode) *pathState {
 			if nextWords, ok := nextInstrWordCount(lines, idx, t); ok {
 				takenCost = cc.Min + nextWords
 			}
-			switch mode {
-			case BranchTaken:
-				decisions[idx] = true
-				base = takenCost + costFrom(skipTo)
-			case BranchNotTaken:
-				decisions[idx] = false
-				base = cc.Min + costFrom(fallIdx)
-			case BranchBest, BranchWorst:
-				noSkip := cc.Min + costFrom(fallIdx)
-				doSkip := takenCost + costFrom(skipTo)
-				take := false
-				if mode == BranchBest {
-					take = doSkip < noSkip
-					base = noSkip
-					if take {
-						base = doSkip
-					}
+			if planned, plannedOK := branchPlanDecision(plan, nil, lines, idx, 0, false, lineLabels); plannedOK {
+				decisions[idx] = planned
+				if planned {
+					base = takenCost + costFrom(skipTo)
 				} else {
-					take = doSkip >= noSkip
-					base = noSkip
-					if take {
-						base = doSkip
-					}
+					base = cc.Min + costFrom(fallIdx)
 				}
-				decisions[idx] = take
+			} else {
+				switch mode {
+				case BranchTaken:
+					decisions[idx] = true
+					base = takenCost + costFrom(skipTo)
+				case BranchNotTaken:
+					decisions[idx] = false
+					base = cc.Min + costFrom(fallIdx)
+				case BranchBest, BranchWorst:
+					noSkip := cc.Min + costFrom(fallIdx)
+					doSkip := takenCost + costFrom(skipTo)
+					take := false
+					if mode == BranchBest {
+						take = doSkip < noSkip
+						base = noSkip
+						if take {
+							base = doSkip
+						}
+					} else {
+						take = doSkip >= noSkip
+						base = noSkip
+						if take {
+							base = doSkip
+						}
+					}
+					decisions[idx] = take
+				}
 			}
 		default:
 			base = cc.Max + costFrom(idx+1)
@@ -363,14 +409,19 @@ func pathStateFor(lines []*asm.Line, t Target, mode BranchMode) *pathState {
 		return base
 	}
 
-	executed := map[int]bool{}
+	counts := map[int]int{}
+	cycleTotals := map[int]int{}
 	done := false
 	for idx := nextInstructionAtOrAfter(lines, 0); idx < len(lines); {
-		if executed[idx] {
+		if counts[idx] >= maxVisits {
 			break
 		}
-		executed[idx] = true
+		counts[idx]++
 		ln := lines[idx]
+		cc, modeled := modeledCycles(ln, t)
+		if modeled {
+			cycleTotals[idx] += cc.Max
+		}
 		switch {
 		case ln.Mnemonic == "RET" || ln.Mnemonic == "RETI":
 			done = true
@@ -380,37 +431,76 @@ func pathStateFor(lines []*asm.Line, t Target, mode BranchMode) *pathState {
 				continue
 			}
 			done = true
+		case ln.Mnemonic == "IJMP" || ln.Mnemonic == "EIJMP":
+			// Indirect jump through Z (or EIND:Z): the target is data-dependent
+			// and cannot be resolved statically, so the path walk stops here.
+			// Marking instructions after an indirect jump as executed would count
+			// code that is, in general, unreachable from this point.
+			done = true
 		case isCondBranch(ln.Mnemonic):
+			fallIdx := nextInstructionIndex(lines, idx)
+			target, resolved := targetIndex(lines, idx, ln.Operands, ln.Comment, labelIndex)
 			take := false
-			switch mode {
-			case BranchTaken:
-				take = true
-			case BranchNotTaken:
-				take = false
-			default:
-				_ = costFrom(idx)
-				take = decisions[idx]
+			if planned, plannedOK := branchPlanDecision(plan, tripVisits, lines, idx, target, resolved, lineLabels); plannedOK {
+				take = planned
+			} else {
+				switch mode {
+				case BranchTaken:
+					take = true
+				case BranchNotTaken:
+					take = false
+				default:
+					_ = costFrom(idx)
+					take = decisions[idx]
+				}
 			}
 			decisions[idx] = take
+			if modeled {
+				cycleTotals[idx] -= cc.Max
+				if take {
+					cycleTotals[idx] += cc.Max
+				} else {
+					cycleTotals[idx] += cc.Min
+				}
+			}
 			if take {
-				if next, ok := targetIndex(lines, idx, ln.Operands, ln.Comment, labelIndex); ok {
-					idx = nextInstructionAtOrAfter(lines, next)
+				if resolved {
+					idx = nextInstructionAtOrAfter(lines, target)
 					continue
 				}
 				done = true
+			} else {
+				idx = nextInstructionAtOrAfter(lines, fallIdx)
+				continue
 			}
 		case isSkip(ln.Mnemonic):
 			take := false
-			switch mode {
-			case BranchTaken:
-				take = true
-			case BranchNotTaken:
-				take = false
-			default:
-				_ = costFrom(idx)
-				take = decisions[idx]
+			if planned, plannedOK := branchPlanDecision(plan, tripVisits, lines, idx, 0, false, lineLabels); plannedOK {
+				take = planned
+			} else {
+				switch mode {
+				case BranchTaken:
+					take = true
+				case BranchNotTaken:
+					take = false
+				default:
+					_ = costFrom(idx)
+					take = decisions[idx]
+				}
 			}
 			decisions[idx] = take
+			if modeled {
+				cycleTotals[idx] -= cc.Max
+				if take {
+					taken := cc.Max
+					if nextWords, ok := nextInstrWordCount(lines, idx, t); ok {
+						taken = cc.Min + nextWords
+					}
+					cycleTotals[idx] += taken
+				} else {
+					cycleTotals[idx] += cc.Min
+				}
+			}
 			if take {
 				idx = nextInstructionAtOrAfter(lines, skipTargetIndex(lines, idx))
 				continue
@@ -424,7 +514,70 @@ func pathStateFor(lines []*asm.Line, t Target, mode BranchMode) *pathState {
 	if sawCycle && (mode == BranchBest || mode == BranchWorst) {
 		return nil
 	}
-	return &pathState{executed: executed, taken: decisions}
+	return &pathState{counts: counts, taken: decisions, cycleTotals: cycleTotals}
+}
+
+func branchPlanDecision(plan BranchPlan, tripVisits map[string]int, lines []*asm.Line, idx, target int, targetOK bool, lineLabels map[int]string) (bool, bool) {
+	for _, key := range branchDecisionKeys(lines, idx, target, targetOK, lineLabels) {
+		if trip, ok := plan.Trips[key]; ok && trip > 0 {
+			if tripVisits == nil {
+				return true, true
+			}
+			visit := tripVisits[key]
+			tripVisits[key] = visit + 1
+			return visit < trip-1, true
+		}
+		if v, ok := plan.Decisions[key]; ok {
+			return v, true
+		}
+	}
+	return false, false
+}
+
+func branchDecisionKeys(lines []*asm.Line, idx, target int, targetOK bool, lineLabels map[int]string) []string {
+	keys := []string{
+		fmt.Sprintf("line:%d", lines[idx].Num),
+		fmt.Sprintf("%d", lines[idx].Num),
+	}
+	if lbl := lineLabels[idx]; lbl != "" {
+		keys = append(keys, "label:"+lbl, lbl)
+	}
+	if targetOK && target >= 0 && target < len(lines) {
+		if lbl := lines[target].Label; lbl != "" {
+			keys = append(keys, "target:"+lbl)
+			keys = append(keys, lbl)
+		}
+	}
+	return keys
+}
+
+func lineLabelAt(lines []*asm.Line, idx int) string {
+	for i := idx; i >= 0; i-- {
+		if lines[i].Label != "" {
+			return lines[i].Label
+		}
+	}
+	return ""
+}
+
+func callSiteKeys(lines []*asm.Line, idx int) []string {
+	keys := []string{
+		fmt.Sprintf("line:%d", lines[idx].Num),
+		fmt.Sprintf("%d", lines[idx].Num),
+	}
+	if lbl := lineLabelAt(lines, idx); lbl != "" {
+		keys = append(keys, "label:"+lbl, lbl)
+	}
+	return keys
+}
+
+func plannedCallTarget(opts Options, lines []*asm.Line, idx int) string {
+	for _, key := range callSiteKeys(lines, idx) {
+		if target := strings.TrimSpace(opts.CallTargets[key]); target != "" {
+			return target
+		}
+	}
+	return ""
 }
 
 func symbolSpans(lines []*asm.Line) map[string][]*asm.Line {
@@ -480,6 +633,7 @@ type stackPeak struct {
 	call       int
 	total      int
 	unresolved int
+	recursive  int
 }
 
 // stackPeaks measures the deepest stack use of a span. executed, when non-nil,
@@ -487,19 +641,19 @@ type stackPeak struct {
 // pruning) and applies only to this top frame — callees execute in full, so
 // recursive calls pass nil. A pruned frame is path-specific, so it bypasses the
 // shared cache to avoid contaminating an unpruned caller's result.
-func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool, symbols map[string][]*asm.Line, cache map[string]stackPeak, visiting map[string]bool) stackPeak {
+func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool, symbols map[string][]*asm.Line, opts Options, cache map[string]stackPeak, visiting map[string]bool) stackPeak {
 	if name != "" {
 		if sp, ok := cache[name]; ok && executed == nil {
 			return sp
 		}
 		if visiting[name] {
-			return stackPeak{}
+			return stackPeak{recursive: 1}
 		}
 		visiting[name] = true
 		defer delete(visiting, name)
 	}
 
-	runningPush, peakPush, peakTotal, unresolvedCalls := 0, 0, 0, 0
+	runningPush, peakPush, peakTotal, unresolvedCalls, recursiveCalls := 0, 0, 0, 0, 0
 	for idx, ln := range lines {
 		if ln.Mnemonic == "" {
 			continue
@@ -529,9 +683,22 @@ func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool,
 			total := runningPush + t.PCBytes
 			if tgt := callTarget(ln, symbols); tgt != "" {
 				if callee, ok := symbols[tgt]; ok {
-					csp := stackPeaks(tgt, callee, t, nil, symbols, cache, visiting)
+					csp := stackPeaks(tgt, callee, t, nil, symbols, opts, cache, visiting)
 					total += csp.total
 					unresolvedCalls += csp.unresolved
+					recursiveCalls += csp.recursive
+					if total > peakTotal {
+						peakTotal = total
+					}
+					continue
+				}
+			}
+			if tgt := plannedCallTarget(opts, lines, idx); tgt != "" {
+				if callee, ok := symbols[tgt]; ok {
+					csp := stackPeaks(tgt, callee, t, nil, symbols, opts, cache, visiting)
+					total += csp.total
+					unresolvedCalls += csp.unresolved
+					recursiveCalls += csp.recursive
 					if total > peakTotal {
 						peakTotal = total
 					}
@@ -539,9 +706,10 @@ func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool,
 				}
 			}
 			if tgt, callee, ok := localCallTarget(lines, idx); ok {
-				csp := stackPeaks(tgt, callee, t, nil, symbols, cache, visiting)
+				csp := stackPeaks(tgt, callee, t, nil, symbols, opts, cache, visiting)
 				total += csp.total
 				unresolvedCalls += csp.unresolved
+				recursiveCalls += csp.recursive
 				if total > peakTotal {
 					peakTotal = total
 				}
@@ -556,7 +724,7 @@ func stackPeaks(name string, lines []*asm.Line, t Target, executed map[int]bool,
 			continue
 		}
 	}
-	sp := stackPeak{push: peakPush, call: peakTotal - peakPush, total: peakTotal, unresolved: unresolvedCalls}
+	sp := stackPeak{push: peakPush, call: peakTotal - peakPush, total: peakTotal, unresolved: unresolvedCalls, recursive: recursiveCalls}
 	if sp.call < 0 {
 		sp.call = 0
 	}
@@ -606,6 +774,16 @@ func branchCycles(info isa.Info, cc isa.CC, lines []*asm.Line, idx int, t Target
 		}
 		switch mode {
 		case BranchBounds:
+			// The ISA table's cc.Max assumes the worst case of skipping a 2-word
+			// instruction. Tighten it to the cost of skipping the actual next
+			// instruction (1 cycle + its word count) so CyclesMax is a reachable
+			// bound. The skipped instruction is still counted toward the totals
+			// on its own line; without this refinement CyclesMax can exceed any
+			// path the code can actually take (e.g. reporting 8 when the true
+			// worst case is 6), which can falsely fail a -max-cycles budget.
+			if nextWords, ok := nextInstrWordCount(lines, idx, t); ok {
+				return isa.CC{Min: cc.Min, Max: cc.Min + nextWords}
+			}
 			return cc
 		case BranchBest, BranchNotTaken:
 			return isa.CC{Min: cc.Min, Max: cc.Min}
@@ -626,14 +804,14 @@ func branchCycles(info isa.Info, cc isa.CC, lines []*asm.Line, idx int, t Target
 	}
 }
 
-func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode BranchMode, symbols map[string][]*asm.Line) Metrics {
+func computeMetrics(name string, iter int, lines []*asm.Line, t Target, opts Options, symbols map[string][]*asm.Line, symbolScope bool) Metrics {
 	m := Metrics{Name: name, Iter: iter, CallBytes: t.PCBytes,
 		Hist: map[string]int{}, Unknown: map[string]int{},
 		Unavailable: map[string]int{}, Unmodeled: map[string]int{}}
-	path := pathStateFor(lines, t, mode)
+	path := pathStateFor(lines, t, opts)
 	var executed map[int]bool
 	if path != nil {
-		executed = path.executed
+		executed = path.executed()
 	}
 	for idx, ln := range lines {
 		if ln.Directive != "" && !asm.AllocatesBSS(ln.Directive) {
@@ -656,7 +834,11 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 			m.Unavailable[info.Mnemonic]++
 			continue
 		}
-		if executed != nil && !executed[idx] {
+		visits := 1
+		if path != nil {
+			visits = path.counts[idx]
+		}
+		if visits <= 0 {
 			continue
 		}
 		// Available on this target: count it toward instructions and flash.
@@ -665,9 +847,15 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 		m.Hist[info.Mnemonic]++
 
 		if cc, ok := info.Cycles(t.Variant, t.PCBytes); ok {
-			cc = branchCycles(info, cc, lines, idx, t, mode, path)
-			m.CyclesMin += cc.Min
-			m.CyclesMax += cc.Max
+			if path != nil {
+				cycles := path.cycleTotals[idx]
+				m.CyclesMin += cycles
+				m.CyclesMax += cycles
+			} else {
+				cc = branchCycles(info, cc, lines, idx, t, opts.BranchMode, nil)
+				m.CyclesMin += cc.Min
+				m.CyclesMax += cc.Max
+			}
 		} else {
 			m.Unmodeled[info.Mnemonic]++ // e.g. SPM: programming-time dependent
 		}
@@ -683,14 +871,37 @@ func computeMetrics(name string, iter int, lines []*asm.Line, t Target, mode Bra
 	}
 	seed := ""
 	if _, ok := symbols[name]; ok {
-		seed = name
+		if symbolScope {
+			// Analyzing the symbol itself: key the top frame by its bare name so
+			// genuine (mutual-)recursion is detected and cut via `visiting`.
+			seed = name
+		} else {
+			// A region/range/file scope that merely shares a name with a callee
+			// symbol must NOT collide with that callee: namespace the key so the
+			// top frame cannot falsely cut the callee's stack analysis.
+			seed = "@scope:" + name
+		}
 	}
-	sp := stackPeaks(seed, lines, t, executed, symbols, map[string]stackPeak{}, map[string]bool{})
+	sp := stackPeaks(seed, lines, t, executed, symbols, opts, map[string]stackPeak{}, map[string]bool{})
 	m.PeakPushBytes = sp.push
 	m.PeakCallBytes = sp.call
 	m.PeakStackBytes = sp.total
 	m.UnresolvedCalls = sp.unresolved
+	m.RecursiveCalls = sp.recursive
 	return m
+}
+
+func (p *pathState) executed() map[int]bool {
+	if p == nil {
+		return nil
+	}
+	out := make(map[int]bool, len(p.counts))
+	for idx, count := range p.counts {
+		if count > 0 {
+			out[idx] = true
+		}
+	}
+	return out
 }
 
 // Analyze produces whole-file metrics, static SRAM totals, and per-region
@@ -701,9 +912,14 @@ func Analyze(lines []*asm.Line, t Target) Result {
 
 // AnalyzeMode produces metrics using the requested conditional-branch policy.
 func AnalyzeMode(lines []*asm.Line, t Target, mode BranchMode) Result {
+	return AnalyzeOptions(lines, t, Options{BranchMode: mode})
+}
+
+// AnalyzeOptions produces metrics using explicit branch/path options.
+func AnalyzeOptions(lines []*asm.Line, t Target, opts Options) Result {
 	symbols := symbolSpans(lines)
 	res := Result{Target: t, Sections: map[string]int{}}
-	res.File = computeMetrics("(whole file)", 1, lines, t, mode, symbols)
+	res.File = computeMetrics("(whole file)", 1, lines, t, opts, symbols, false)
 	for _, ln := range lines {
 		if ln.Directive == "" {
 			continue
@@ -721,8 +937,8 @@ func AnalyzeMode(lines []*asm.Line, t Target, mode BranchMode) Result {
 		res.SRAMStatic += b
 		res.Sections[sec] += b
 	}
-	res.Regions = extractRegions(lines, t, mode, symbols)
-	res.Symbols = extractSymbols(lines, t, mode, symbols)
+	res.Regions, res.Warnings = extractRegions(lines, t, opts, symbols)
+	res.Symbols = extractSymbols(lines, t, opts, symbols)
 	return res
 }
 
@@ -732,27 +948,45 @@ type openRegion struct {
 	start int
 }
 
-func extractRegions(lines []*asm.Line, t Target, mode BranchMode, symbols map[string][]*asm.Line) []Metrics {
+func extractRegions(lines []*asm.Line, t Target, opts Options, symbols map[string][]*asm.Line) ([]Metrics, []string) {
 	var stack []openRegion
 	var out []Metrics
+	var warns []string
 	for idx, ln := range lines {
 		for _, b := range ln.RegionBegins {
 			stack = append(stack, openRegion{b.Name, b.Iter, idx})
 		}
 		for _, name := range ln.RegionEnds {
+			matched := false
 			for j := len(stack) - 1; j >= 0; j-- {
 				if stack[j].name != name {
 					continue
 				}
 				or := stack[j]
 				stack = append(stack[:j], stack[j+1:]...)
-				sub := lines[or.start+1 : idx]
-				out = append(out, computeMetrics(or.name, or.iter, sub, t, mode, symbols))
+				// The region body is the instructions strictly between the
+				// @begin and @end anchor lines. Clamp the start so an @begin
+				// and @end that share one line (or sit on adjacent lines) yields
+				// an empty span rather than panicking on a backwards slice
+				// (lines[start+1 : idx] with start+1 > idx).
+				lo := or.start + 1
+				if lo > idx {
+					lo = idx
+				}
+				sub := lines[lo:idx]
+				out = append(out, computeMetrics(or.name, or.iter, sub, t, opts, symbols, false))
+				matched = true
 				break
+			}
+			if !matched {
+				warns = append(warns, fmt.Sprintf("@end %s has no matching @begin; ignored", name))
 			}
 		}
 	}
-	return out
+	for _, or := range stack {
+		warns = append(warns, fmt.Sprintf("@begin %s (line %d) has no matching @end; region dropped", or.name, lines[or.start].Num))
+	}
+	return out, warns
 }
 
 func findLabel(lines []*asm.Line, label string) int {
@@ -785,14 +1019,14 @@ func nextSymbolBoundary(lines []*asm.Line, start int) int {
 	return len(lines)
 }
 
-func extractSymbols(lines []*asm.Line, t Target, mode BranchMode, symbols map[string][]*asm.Line) []Metrics {
+func extractSymbols(lines []*asm.Line, t Target, opts Options, symbols map[string][]*asm.Line) []Metrics {
 	var out []Metrics
 	for i, ln := range lines {
 		if ln.Label == "" || isLocalLabel(ln.Label) {
 			continue
 		}
 		end := nextSymbolBoundary(lines, i)
-		out = append(out, computeMetrics(ln.Label, 1, lines[i:end], t, mode, symbols))
+		out = append(out, computeMetrics(ln.Label, 1, lines[i:end], t, opts, symbols, true))
 	}
 	return out
 }
@@ -803,6 +1037,10 @@ func RangeMetrics(lines []*asm.Line, from, to string, iter int, t Target) (Metri
 }
 
 func RangeMetricsMode(lines []*asm.Line, from, to string, iter int, t Target, mode BranchMode) (Metrics, error) {
+	return RangeMetricsOptions(lines, from, to, iter, t, Options{BranchMode: mode})
+}
+
+func RangeMetricsOptions(lines []*asm.Line, from, to string, iter int, t Target, opts Options) (Metrics, error) {
 	symbols := symbolSpans(lines)
 	fi, ti := findLabel(lines, from), findLabel(lines, to)
 	if fi < 0 {
@@ -814,7 +1052,7 @@ func RangeMetricsMode(lines []*asm.Line, from, to string, iter int, t Target, mo
 	if ti < fi {
 		fi, ti = ti, fi
 	}
-	return computeMetrics(from+":"+to, iter, lines[fi:ti+1], t, mode, symbols), nil
+	return computeMetrics(from+":"+to, iter, lines[fi:ti+1], t, opts, symbols, false), nil
 }
 
 // SymbolMetrics analyzes the span that starts at label and runs until the next
@@ -825,11 +1063,15 @@ func SymbolMetrics(lines []*asm.Line, label string, iter int, t Target) (Metrics
 }
 
 func SymbolMetricsMode(lines []*asm.Line, label string, iter int, t Target, mode BranchMode) (Metrics, error) {
+	return SymbolMetricsOptions(lines, label, iter, t, Options{BranchMode: mode})
+}
+
+func SymbolMetricsOptions(lines []*asm.Line, label string, iter int, t Target, opts Options) (Metrics, error) {
 	symbols := symbolSpans(lines)
 	start := findLabel(lines, label)
 	if start < 0 {
 		return Metrics{}, fmt.Errorf("symbol %q not found", label)
 	}
 	end := nextSymbolBoundary(lines, start)
-	return computeMetrics(label, iter, lines[start:end], t, mode, symbols), nil
+	return computeMetrics(label, iter, lines[start:end], t, opts, symbols, true), nil
 }

@@ -229,6 +229,9 @@ The full set (all optional; sensible defaults shown in parentheses):
 | `-clock MHz` | also report wall-clock time (default `20`; `0` disables)      |
 | `-from L` / `-to L` / `-iter N` | analyze an explicit label range × N iterations |
 | `-branches M` | conditional timing mode: `bounds`, `best`, `worst`, `taken`, `not-taken` |
+| `-branch-scenario S` | explicit branch choices/trips: `key=taken`, `key=not-taken`, or `key=N` |
+| `-path-visits N` | max visits per instruction in pruned paths (default `1`) |
+| `-call-target S` | explicit unresolved/indirect call targets: `key=symbol` |
 | `-rank N` / `-rank-by M` | rank top `N` symbol/region spans by `cycles`, `flash`, or `stack` |
 | `-symbol L` / `-func L` | analyze one symbol/function from its label to the next non-local symbol |
 | `-vs FILE`   | diff the target file against a baseline (same core)           |
@@ -267,6 +270,20 @@ resolvable branches/jumps and stop on `RET` or a repeated instruction. On
 acyclic control flow, `best` / `worst` now also prune to the cheaper or more
 expensive downstream path; on cyclic spans they fall back to timing-only
 selection rather than pretending to prove an unbounded loop path.
+
+`-branch-scenario` overrides the preset for specific branches/skips. Keys can be
+a branch's nearest label, its source line as `line:N`, or a branch target label.
+Values are `taken`, `not-taken`, or a positive trip count. A trip count on a
+loop target, for example `-branch-scenario loop=10`, takes the branch nine times
+and falls through once; cycles follow that bounded path while instruction count
+and flash remain the static reachable footprint. `-path-visits N` is a coarse
+guard for repeated visits in pruned paths.
+
+`-call-target` resolves an otherwise unresolved or indirect call site when you
+know the callee, for example `-call-target dispatch=handler` or
+`-call-target line:42=handler`. Recursive or cyclic call edges are detected and
+reported as unbounded diagnostics; they are not silently converted into a false
+finite stack proof.
 
 `-rank N` surfaces the top `N` costly top-level symbol spans and annotated
 regions in the current file. `-rank-by cycles` sorts by worst-case cycle total,
@@ -554,15 +571,13 @@ modeled, `⚠` unrecognised) — see [Reading the report](#reading-the-report).
 
 ## Limitations
 
-- It is a listing analyser, not a simulator: it does not follow calls or
-  branches, so loop totals come from your `iter=` annotation and cycle ranges
-  are bounds, not one executed path. The pruned branch modes follow direct
-  resolvable control flow and stop at `RET` or a repeated instruction, but this
-  is still a bounded path-selection heuristic rather than a full CFG proof.
-- Call-stack reporting now follows direct intra-file calls into known top-level
-  symbols and local labels, and it flags unresolved/indirect call edges
-  separately. Recursive/cyclic call graphs are still truncated rather than
-  expanded indefinitely.
+- It is a listing analyser, not a simulator. Branch presets and
+  `-branch-scenario` select bounded paths through direct, resolvable control
+  flow; data-dependent paths still need an explicit scenario or remain bounds.
+- Call-stack reporting follows direct intra-file calls into known top-level
+  symbols and local labels, accepts explicit `-call-target` mappings for
+  unresolved/indirect call sites, and reports recursive/cyclic call edges as
+  unbounded diagnostics rather than expanding indefinitely.
 - `LD`/`ST`/`LDD` addressing-mode timing on AVRxm and AVRrc is given as a range
   (the manual splits it by mode); AVRe and AVRxt are exact.
 - In **source** mode, the C preprocessor is applied only with `-cpp`; GNU-as

@@ -351,6 +351,64 @@ heavy:
 	}
 }
 
+func TestBranchModeIndirectJumpStopsPath(t *testing.T) {
+	src := `start:
+	ijmp
+	push r16
+	pop r16
+	ret
+`
+	m := analyze.AnalyzeMode(asm.Parse(src), attiny3217, analyze.BranchNotTaken).File
+	if m.InstrCount != 1 {
+		t.Fatalf("instructions = %d, want 1", m.InstrCount)
+	}
+	if m.PeakStackBytes != 0 {
+		t.Fatalf("peak stack = %d, want 0", m.PeakStackBytes)
+	}
+}
+
+func TestBranchScenarioSelectsTargetLabel(t *testing.T) {
+	src := `start:
+	brne heavy
+	ret
+heavy:
+	push r16
+	pop r16
+	ret
+`
+	m := analyze.AnalyzeOptions(asm.Parse(src), attiny3217, analyze.Options{
+		BranchPlan: analyze.BranchPlan{Decisions: map[string]bool{"heavy": true}},
+	}).File
+	if m.InstrCount != 4 {
+		t.Fatalf("instructions = %d, want 4", m.InstrCount)
+	}
+	if m.CyclesMin != 9 || m.CyclesMax != 9 {
+		t.Fatalf("cycles = %d-%d, want 9", m.CyclesMin, m.CyclesMax)
+	}
+}
+
+func TestBranchScenarioLoopTripCount(t *testing.T) {
+	src := `start:
+	ldi r16, 3
+loop:
+	dec r16
+	brne loop
+	ret
+`
+	m := analyze.AnalyzeOptions(asm.Parse(src), attiny3217, analyze.Options{
+		BranchPlan: analyze.BranchPlan{Trips: map[string]int{"loop": 3}},
+	}).File
+	if m.InstrCount != 4 {
+		t.Fatalf("instructions = %d, want static reachable count 4", m.InstrCount)
+	}
+	if m.FlashWords != 4 {
+		t.Fatalf("flash words = %d, want static footprint 4", m.FlashWords)
+	}
+	if m.CyclesMin != 13 || m.CyclesMax != 13 {
+		t.Fatalf("cycles = %d-%d, want 13", m.CyclesMin, m.CyclesMax)
+	}
+}
+
 // In not-taken mode the pushes on the unreachable (taken) path must not count
 // toward peak stack, matching the pruned instruction/cycle accounting.
 func TestStackPeakRespectsBranchPruning(t *testing.T) {
@@ -454,6 +512,9 @@ func TestRecursiveCallDoesNotLoopForever(t *testing.T) {
 	if m.PeakStackBytes != 3 {
 		t.Fatalf("peak stack = %d, want 3", m.PeakStackBytes)
 	}
+	if m.RecursiveCalls != 1 {
+		t.Fatalf("recursive calls = %d, want 1", m.RecursiveCalls)
+	}
 }
 
 func TestLocalLabelCallIncludesCalleeStack(t *testing.T) {
@@ -482,6 +543,31 @@ func TestLocalLabelCallIncludesCalleeStack(t *testing.T) {
 	}
 }
 
+func TestScopeNameDoesNotHideSameNamedCalleeStack(t *testing.T) {
+	src := `f:
+	push r16
+	call g
+	pop r16
+	ret
+g:
+	push r17
+	push r18
+	pop r18
+	pop r17
+	ret
+`
+	m, err := analyze.RangeMetrics(asm.Parse(src), "f", "g", 1, attiny3217)
+	if err != nil {
+		t.Fatalf("RangeMetrics: %v", err)
+	}
+	if m.Name != "f:g" {
+		t.Fatalf("name = %q, want f:g", m.Name)
+	}
+	if m.PeakStackBytes != 5 {
+		t.Fatalf("peak stack = %d, want 5", m.PeakStackBytes)
+	}
+}
+
 func TestIndirectCallCountsAsUnresolvedStackEdge(t *testing.T) {
 	src := `f:
 	push r16
@@ -498,6 +584,30 @@ func TestIndirectCallCountsAsUnresolvedStackEdge(t *testing.T) {
 	}
 	if m.PeakStackBytes != 3 {
 		t.Fatalf("peak stack = %d, want 3", m.PeakStackBytes)
+	}
+}
+
+func TestIndirectCallUsesExplicitCallTarget(t *testing.T) {
+	src := `f:
+	push r16
+	icall
+	pop r16
+	ret
+g:
+	push r17
+	push r18
+	pop r18
+	pop r17
+	ret
+`
+	m := analyze.AnalyzeOptions(asm.Parse(src), attiny3217, analyze.Options{
+		CallTargets: map[string]string{"f": "g"},
+	}).File
+	if m.UnresolvedCalls != 0 {
+		t.Fatalf("unresolved calls = %d, want 0", m.UnresolvedCalls)
+	}
+	if m.PeakStackBytes != 5 {
+		t.Fatalf("peak stack = %d, want 5", m.PeakStackBytes)
 	}
 }
 
@@ -546,6 +656,24 @@ func TestAnalyzeUsesOperandQualifiedMissingInstructions(t *testing.T) {
 	}
 	if m.Hist["LPM"] != 1 {
 		t.Fatalf("LPM should be counted as available, hist=%v unavailable=%v", m.Hist, m.Unavailable)
+	}
+}
+
+func TestAnalyzeReportsMalformedRegions(t *testing.T) {
+	src := `	; @end stray
+	; @begin open
+	nop
+	; @begin empty ; @end empty
+`
+	res := analyze.Analyze(asm.Parse(src), attiny3217)
+	if len(res.Warnings) != 2 {
+		t.Fatalf("warnings = %d (%v), want 2", len(res.Warnings), res.Warnings)
+	}
+	if len(res.Regions) != 1 {
+		t.Fatalf("regions = %d, want 1", len(res.Regions))
+	}
+	if res.Regions[0].Name != "empty" || res.Regions[0].InstrCount != 0 {
+		t.Fatalf("empty region = %+v, want empty zero-instruction region", res.Regions[0])
 	}
 }
 

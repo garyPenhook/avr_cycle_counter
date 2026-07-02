@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"cyclecount/internal/analyze"
+	"cyclecount/internal/asm"
 	"cyclecount/internal/isa"
 )
 
@@ -160,6 +161,38 @@ func TestCSVList(t *testing.T) {
 	}
 }
 
+func TestParseBranchPlan(t *testing.T) {
+	plan, err := parseBranchPlan("loop=3,line:12=not-taken,done=taken")
+	if err != nil {
+		t.Fatalf("parseBranchPlan: %v", err)
+	}
+	if plan.Trips["loop"] != 3 {
+		t.Fatalf("loop trip = %d, want 3", plan.Trips["loop"])
+	}
+	if plan.Decisions["line:12"] {
+		t.Fatal("line:12 should be not-taken")
+	}
+	if !plan.Decisions["done"] {
+		t.Fatal("done should be taken")
+	}
+	if _, err := parseBranchPlan("bad"); err == nil {
+		t.Fatal("expected invalid branch scenario error")
+	}
+}
+
+func TestParseCallTargets(t *testing.T) {
+	targets, err := parseCallTargets("dispatch=handler,line:22=slow")
+	if err != nil {
+		t.Fatalf("parseCallTargets: %v", err)
+	}
+	if targets["dispatch"] != "handler" || targets["line:22"] != "slow" {
+		t.Fatalf("unexpected targets: %v", targets)
+	}
+	if _, err := parseCallTargets("bad"); err == nil {
+		t.Fatal("expected invalid call target error")
+	}
+}
+
 func TestResolveTargetsMultiMCU(t *testing.T) {
 	oldMCU, oldCore, oldPC := *flMCU, *flCore, *flPC
 	t.Cleanup(func() {
@@ -290,6 +323,35 @@ func TestRenderMatrix(t *testing.T) {
 		if !bytes.Contains(buf.Bytes(), []byte(s)) {
 			t.Fatalf("output missing %q:\n%s", s, out)
 		}
+	}
+}
+
+func TestRenderListingUsesOperandQualifiedAvailability(t *testing.T) {
+	target := isaTarget("AVRe", isa.VarAVRe, 2)
+	res := analyze.Analyze(asm.Parse("f:\n\tspm Z+\n"), target)
+	var buf bytes.Buffer
+	renderMetrics(&buf, res.File, target, 0, true)
+	out := buf.String()
+	if !strings.Contains(out, "unavailable") || !strings.Contains(out, "n/a") {
+		t.Fatalf("verbose listing should report SPM Z+ as unavailable:\n%s", out)
+	}
+}
+
+func TestRenderReportIncludesWarnings(t *testing.T) {
+	res := analyze.Result{
+		Target:   isaTarget("ATtiny3217", isa.VarAVRxt, 2),
+		File:     analyze.Metrics{Name: "(whole file)", Iter: 1},
+		Sections: map[string]int{},
+		Warnings: []string{"@end stray has no matching @begin; ignored"},
+	}
+	oldBranches := *flBranches
+	t.Cleanup(func() { *flBranches = oldBranches })
+	*flBranches = "bounds"
+	var buf bytes.Buffer
+	renderReport(&buf, res, nil, "hot.S", 0, false)
+	out := buf.String()
+	if !strings.Contains(out, "== warnings ==") || !strings.Contains(out, "@end stray") {
+		t.Fatalf("report missing warnings:\n%s", out)
 	}
 }
 
@@ -473,13 +535,14 @@ func TestEmitJSONIncludesRankingAndSymbols(t *testing.T) {
 		Symbols: []analyze.Metrics{
 			{Name: "toggle_pin", CyclesMax: 8},
 		},
+		Warnings: []string{"@begin open (line 2) has no matching @end; region dropped"},
 	}
 	emitJSON(res, nil, nil, "firmware.o", nil)
 	_ = w.Close()
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
 	out := buf.String()
-	for _, s := range []string{`"symbols": [`, `"name": "toggle_pin"`, `"ranking": [`, `"metric": "cycles"`} {
+	for _, s := range []string{`"symbols": [`, `"name": "toggle_pin"`, `"ranking": [`, `"metric": "cycles"`, `"warnings": [`} {
 		if !strings.Contains(out, s) {
 			t.Fatalf("json missing %q:\n%s", s, out)
 		}

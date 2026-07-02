@@ -270,6 +270,11 @@ func init() {
 	// by Appendix-A overlays via AvailableOnTarget, not by this core-level table.
 	avail([]string{"MOVW", "SPM"},
 		VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt)
+	// SPM Z+ (auto-increment self-programming) is present only on AVRxm/AVRxt
+	// (DS40002198C Table 7-1, p.134), unlike bare SPM which is also on
+	// AVRe/AVRe+. Modeled as a form-qualified entry so AvailableOnTargetForm
+	// distinguishes "spm" from "spm Z+".
+	avail([]string{"SPM Z+"}, VarAVRxm, VarAVRxt)
 	// CALL/JMP are absent on both the original AVR core and the Reduced Core
 	// (Table 7-1 Core Description: present only on AVRe/AVRe+/AVRxm/AVRxt).
 	// Device-specific omissions on enhanced parts are layered on via Appendix A.
@@ -320,9 +325,15 @@ func AvailableOnTarget(mnemonic string, v Variant, pcBytes, flashKB int, missing
 // "LD X" or "SPM Z+".
 func AvailableOnTargetForm(mnemonic, operands string, v Variant, pcBytes, flashKB int, missing MissingSet) bool {
 	M := strings.ToUpper(strings.TrimSpace(mnemonic))
+	form := formKey(M, operands)
 	if missing != nil {
-		if missing[M] || missing[formKey(M, operands)] {
+		if missing[M] || missing[form] {
 			return false
+		}
+	}
+	if form != "" {
+		if _, ok := availability[form]; ok {
+			return Available(form, v, pcBytes, flashKB)
 		}
 	}
 	return Available(M, v, pcBytes, flashKB)

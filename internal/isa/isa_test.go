@@ -146,6 +146,16 @@ func TestAvailableOnTargetForm(t *testing.T) {
 	if !isa.AvailableOnTargetForm("LPM", "", d.Variant, d.PCBytes, d.FlashKB, d.Missing) {
 		t.Fatal("LPM should be available on ATtiny11 per DS40002198C")
 	}
+
+	if isa.AvailableOnTargetForm("SPM", "Z+", isa.VarAVRe, 2, 8, nil) {
+		t.Fatal("SPM Z+ should be unavailable on AVRe")
+	}
+	if !isa.AvailableOnTargetForm("SPM", "Z+", isa.VarAVRxt, 2, 32, nil) {
+		t.Fatal("SPM Z+ should be available on AVRxt")
+	}
+	if !isa.AvailableOnTargetForm("SPM", "", isa.VarAVRe, 2, 8, nil) {
+		t.Fatal("bare SPM should remain available on AVRe")
+	}
 }
 
 func TestDevicesSortedAndConsistent(t *testing.T) {

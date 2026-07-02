@@ -2,15 +2,15 @@
 
 - Done: add symbol/function-scoped analysis for source and binary input via `-func foo` / `-symbol foo`.
 - Done: add multi-target comparison in one run via comma-separated `-mcu` or `-core` lists.
-- Partly done: add branch-assumption modes via `-branches bounds|best|worst|taken|not-taken`.
-- Partly done: pruned branch modes now follow direct resolvable branches/jumps; `best`/`worst` also prune acyclic spans.
-- Still open: explicit scenario selection for branch behavior beyond the current mode presets.
-- Partly done: loop-heavy pruned paths still stop on repeated instructions; no loop-trip proof yet.
-- Partly done: model peak local push depth plus direct intra-file callee stack at call sites, including local-label callees and unresolved-call accounting.
-- Still open: full interprocedural worst-case modeling across recursive/cyclic call graphs.
-- Partly done: indirect/dynamic calls (`ICALL` / unresolved targets) are now flagged, but not fully resolved.
+- Done: add branch-assumption modes via `-branches bounds|best|worst|taken|not-taken`.
+- Done: pruned branch modes now follow direct resolvable branches/jumps; `best`/`worst` also prune acyclic spans.
+- Done: explicit scenario selection for branch behavior via `-branch-scenario key=taken|not-taken|N`.
+- Done: loop-heavy pruned paths can use explicit trip proofs via `-branch-scenario loop_label=N`; static footprint stays unmultiplied while cycles follow the bounded path.
+- Done: model peak local push depth plus direct intra-file callee stack at call sites, including local-label callees and unresolved-call accounting.
+- Done: recursive/cyclic call graph edges are detected and reported as unbounded diagnostics instead of being silently folded into a finite stack proof.
+- Done: indirect/dynamic calls (`ICALL` / unresolved targets) are flagged by default and can be resolved explicitly with `-call-target key=symbol`.
 - Done: add `-format csv|md|gha|sarif` alongside existing text/json output.
-- Partly done: broaden device coverage with family-pattern fallback matching.
+- Done: broaden device coverage with generated exact-device data plus family-pattern fallback matching.
 - Done: generate the exact-device MCU/core/PC database from Appendix A (`go generate`).
 - Done: add `-rank N` / `-rank-by cycles|flash|stack` for symbol/region ranking.
 

@@ -19,6 +19,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -28,23 +29,26 @@ import (
 )
 
 var (
-	flVerbose  = flag.Bool("v", false, "print a per-instruction listing with word/cycle costs")
-	flJSON     = flag.Bool("json", false, "emit machine-readable JSON instead of a text report")
-	flFormat   = flag.String("format", "text", "output format: text, json, csv, md, gha, sarif")
-	flClock    = flag.Float64("clock", 20.0, "CPU clock in MHz for wall-clock time (0 disables)")
-	flMCU      = flag.String("mcu", "", "target part number, e.g. attiny3217, atmega328p, avr128da48")
-	flCore     = flag.String("core", "", "CPU variant: avr, avre, avre+, avrxm, avrxt, avrrc")
-	flPC       = flag.Int("pc", 0, "program-counter width in bytes: 2 (16-bit) or 3 (22-bit)")
-	flFrom     = flag.String("from", "", "start label for an explicit range analysis")
-	flTo       = flag.String("to", "", "end label for an explicit range analysis")
-	flIter     = flag.Int("iter", 1, "loop trip count applied to the -from/-to range")
-	flBranches = flag.String("branches", "bounds", "conditional control-flow mode: bounds, best, worst, taken, not-taken")
-	flRank     = flag.Int("rank", 0, "show the top N costly symbol/region spans (0 disables)")
-	flRankBy   = flag.String("rank-by", "cycles", "ranking metric: cycles, flash, stack")
-	flSymbol   = flag.String("symbol", "", "analyze one symbol/function from its label to the next non-local symbol")
-	flFunc     = flag.String("func", "", "alias for -symbol")
-	flVS       = flag.String("vs", "", "baseline file to diff the target against")
-	flObjdump  = flag.String("objdump", "avr-objdump", "objdump binary used for ELF/.o/.hex input")
+	flVerbose    = flag.Bool("v", false, "print a per-instruction listing with word/cycle costs")
+	flJSON       = flag.Bool("json", false, "emit machine-readable JSON instead of a text report")
+	flFormat     = flag.String("format", "text", "output format: text, json, csv, md, gha, sarif")
+	flClock      = flag.Float64("clock", 20.0, "CPU clock in MHz for wall-clock time (0 disables)")
+	flMCU        = flag.String("mcu", "", "target part number, e.g. attiny3217, atmega328p, avr128da48")
+	flCore       = flag.String("core", "", "CPU variant: avr, avre, avre+, avrxm, avrxt, avrrc")
+	flPC         = flag.Int("pc", 0, "program-counter width in bytes: 2 (16-bit) or 3 (22-bit)")
+	flFrom       = flag.String("from", "", "start label for an explicit range analysis")
+	flTo         = flag.String("to", "", "end label for an explicit range analysis")
+	flIter       = flag.Int("iter", 1, "loop trip count applied to the -from/-to range")
+	flBranches   = flag.String("branches", "bounds", "conditional control-flow mode: bounds, best, worst, taken, not-taken")
+	flScenario   = flag.String("branch-scenario", "", "explicit branch choices/trips: key=taken|not-taken|N, comma-separated; keys are labels or line:N")
+	flPathVisits = flag.Int("path-visits", 1, "maximum visits per instruction in pruned branch paths (loop bound, 1 disables repeats)")
+	flCallTarget = flag.String("call-target", "", "explicit unresolved/indirect call targets: key=symbol, comma-separated; keys are labels or line:N")
+	flRank       = flag.Int("rank", 0, "show the top N costly symbol/region spans (0 disables)")
+	flRankBy     = flag.String("rank-by", "cycles", "ranking metric: cycles, flash, stack")
+	flSymbol     = flag.String("symbol", "", "analyze one symbol/function from its label to the next non-local symbol")
+	flFunc       = flag.String("func", "", "alias for -symbol")
+	flVS         = flag.String("vs", "", "baseline file to diff the target against")
+	flObjdump    = flag.String("objdump", "avr-objdump", "objdump binary used for ELF/.o/.hex input")
 
 	flMaxCycles = flag.Int("max-cycles", 0, "fail (exit 3) if worst-case cycles exceed N (0 disables)")
 	flMaxFlash  = flag.Int("max-flash", 0, "fail (exit 3) if flash bytes exceed N (0 disables)")
@@ -337,16 +341,20 @@ func (r analysisRun) scopeMetrics() analyze.Metrics {
 func analyzeForTarget(lines []*asm.Line, target analyze.Target) (analysisRun, error) {
 	run := analysisRun{Target: target}
 	mode, _ := analyze.ParseBranchMode(*flBranches)
-	run.Result = analyze.AnalyzeMode(lines, target, mode)
+	opts, err := analyzeOptions(mode)
+	if err != nil {
+		return run, err
+	}
+	run.Result = analyze.AnalyzeOptions(lines, target, opts)
 	if *flFrom != "" || *flTo != "" {
-		m, err := analyze.RangeMetricsMode(lines, *flFrom, *flTo, *flIter, target, mode)
+		m, err := analyze.RangeMetricsOptions(lines, *flFrom, *flTo, *flIter, target, opts)
 		if err != nil {
 			return run, err
 		}
 		run.Range = &m
 	}
 	if name := selectedSymbol(); name != "" {
-		m, err := analyze.SymbolMetricsMode(lines, name, *flIter, target, mode)
+		m, err := analyze.SymbolMetricsOptions(lines, name, *flIter, target, opts)
 		if err != nil {
 			return run, err
 		}
@@ -354,6 +362,97 @@ func analyzeForTarget(lines []*asm.Line, target analyze.Target) (analysisRun, er
 	}
 	run.Budgets = evalBudgets(budgetsFromFlags(), run.Result, run.Range, run.Symbol)
 	return run, nil
+}
+
+func analyzeOptions(mode analyze.BranchMode) (analyze.Options, error) {
+	plan, err := parseBranchPlan(*flScenario)
+	if err != nil {
+		return analyze.Options{}, err
+	}
+	callTargets, err := parseCallTargets(*flCallTarget)
+	if err != nil {
+		return analyze.Options{}, err
+	}
+	plan.MaxVisits = *flPathVisits
+	return analyze.Options{BranchMode: mode, BranchPlan: plan, CallTargets: callTargets}, nil
+}
+
+func parseBranchPlan(spec string) (analyze.BranchPlan, error) {
+	plan := analyze.BranchPlan{}
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return plan, nil
+	}
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			return plan, fmt.Errorf("invalid -branch-scenario item %q (want key=taken, key=not-taken, or key=N)", part)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.ToLower(strings.TrimSpace(value))
+		if key == "" || value == "" {
+			return plan, fmt.Errorf("invalid -branch-scenario item %q", part)
+		}
+		if n, err := strconv.Atoi(value); err == nil {
+			if n < 1 {
+				return plan, fmt.Errorf("invalid trip count %q in -branch-scenario item %q", value, part)
+			}
+			if plan.Trips == nil {
+				plan.Trips = map[string]int{}
+			}
+			plan.Trips[key] = n
+			continue
+		}
+		decision, ok := parseBranchDecision(value)
+		if !ok {
+			return plan, fmt.Errorf("invalid branch decision %q in -branch-scenario item %q", value, part)
+		}
+		if plan.Decisions == nil {
+			plan.Decisions = map[string]bool{}
+		}
+		plan.Decisions[key] = decision
+	}
+	return plan, nil
+}
+
+func parseBranchDecision(value string) (bool, bool) {
+	switch value {
+	case "taken", "take", "t", "true", "yes", "skip":
+		return true, true
+	case "not-taken", "nottaken", "fallthrough", "fall-through", "not", "false", "no", "noskip", "no-skip":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func parseCallTargets(spec string) (map[string]string, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid -call-target item %q (want key=symbol)", part)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			return nil, fmt.Errorf("invalid -call-target item %q", part)
+		}
+		out[key] = value
+	}
+	return out, nil
 }
 
 func resolveFormat() (outputFormat, error) {
@@ -491,7 +590,11 @@ func main() {
 		// file so the diff is apples-to-apples; otherwise -branches worst on the
 		// new file would show a spurious Δ against a bounds-mode baseline.
 		mode, _ := analyze.ParseBranchMode(*flBranches)
-		bres := analyze.AnalyzeMode(blines, run.Target, mode)
+		opts, err := analyzeOptions(mode)
+		if err != nil {
+			fail(err)
+		}
+		bres := analyze.AnalyzeOptions(blines, run.Target, opts)
 		if format == fmtJSON {
 			emitCompareJSON(run.Result, bres, path, *flVS, run.Budgets)
 		} else if format == fmtCSV {
@@ -575,8 +678,17 @@ func validateSelectionFlags() error {
 	if *flRank < 0 {
 		return errors.New("-rank must be >= 0")
 	}
+	if *flPathVisits < 1 {
+		return errors.New("-path-visits must be >= 1")
+	}
 	if _, ok := analyze.ParseBranchMode(*flBranches); !ok {
 		return fmt.Errorf("unknown -branches mode %q (use bounds, best, worst, taken, or not-taken)", *flBranches)
+	}
+	if _, err := parseBranchPlan(*flScenario); err != nil {
+		return err
+	}
+	if _, err := parseCallTargets(*flCallTarget); err != nil {
+		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(*flRankBy)) {
 	case "cycles", "flash", "stack":
@@ -671,6 +783,7 @@ func renderReport(w io.Writer, res analyze.Result, rng *analyze.Metrics, path st
 	if rng != nil {
 		renderMetrics(w, *rng, t, clock, verbose)
 	}
+	renderWarnings(w, res.Warnings)
 
 	fmt.Fprintln(w, "== static SRAM (.data/.bss/.noinit) ==")
 	fmt.Fprintf(w, "  Allocated      : %d bytes\n", res.SRAMStatic)
@@ -686,6 +799,17 @@ func renderReport(w io.Writer, res analyze.Result, rng *analyze.Metrics, path st
 		fmt.Fprintln(w, "Best/worst mode constrains conditional timing only; it does not prune later instructions from the listing.")
 	}
 	fmt.Fprintln(w, "LD/LDD/ST/STD/LDS/STS add 1 cycle when the access targets NVM (manual note 2).")
+}
+
+func renderWarnings(w io.Writer, warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "== warnings ==")
+	for _, warning := range warnings {
+		fmt.Fprintf(w, "  %s\n", warning)
+	}
+	fmt.Fprintln(w)
 }
 
 func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float64, verbose bool) {
@@ -725,6 +849,9 @@ func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float
 			if m.UnresolvedCalls > 0 {
 				fmt.Fprintf(w, ", %d unresolved/indirect", m.UnresolvedCalls)
 			}
+			if m.RecursiveCalls > 0 {
+				fmt.Fprintf(w, ", %d recursive/cyclic edge(s)", m.RecursiveCalls)
+			}
 		}
 		fmt.Fprintln(w)
 	}
@@ -760,7 +887,7 @@ func renderListing(w io.Writer, m analyze.Metrics, t analyze.Target) {
 		if lm.Known {
 			words = fmt.Sprintf("%d", lm.Info.WordCount(t.Variant))
 			switch {
-			case !isa.AvailableOnTarget(lm.Line.Mnemonic, t.Variant, t.PCBytes, t.FlashKB, t.Missing):
+			case !isa.AvailableOnTargetForm(lm.Line.Mnemonic, lm.Line.Operands, t.Variant, t.PCBytes, t.FlashKB, t.Missing):
 				cyc, note = "n/a", "not on "+t.Name
 			case lm.Info.Special != "":
 				cyc, note = "—", lm.Info.Special
@@ -1065,6 +1192,12 @@ func matrixNotes(m analyze.Metrics) string {
 	if len(m.Unknown) > 0 {
 		notes = append(notes, "unknown="+strings.Join(sortedKeys(m.Unknown), ","))
 	}
+	if m.UnresolvedCalls > 0 {
+		notes = append(notes, fmt.Sprintf("unresolved_calls=%d", m.UnresolvedCalls))
+	}
+	if m.RecursiveCalls > 0 {
+		notes = append(notes, fmt.Sprintf("recursive_calls=%d", m.RecursiveCalls))
+	}
 	if len(notes) == 0 {
 		return "-"
 	}
@@ -1214,24 +1347,26 @@ func sortedKeys(m map[string]int) []string {
 // ---------------------------------------------------------------- JSON
 
 type jsonMetrics struct {
-	Name           string   `json:"name"`
-	Iter           int      `json:"iter"`
-	Instructions   int      `json:"instructions"`
-	FlashWords     int      `json:"flash_words"`
-	FlashBytes     int      `json:"flash_bytes"`
-	CyclesMin      int      `json:"cycles_min"`
-	CyclesMax      int      `json:"cycles_max"`
-	CyclesMinTotal int      `json:"cycles_min_total"`
-	CyclesMaxTotal int      `json:"cycles_max_total"`
-	PeakStackBytes int      `json:"peak_stack_bytes"`
-	PeakPushBytes  int      `json:"peak_push_bytes"`
-	PeakCallBytes  int      `json:"peak_call_bytes"`
-	Pushes         int      `json:"pushes"`
-	Pops           int      `json:"pops"`
-	Calls          int      `json:"calls"`
-	Unavailable    []string `json:"unavailable,omitempty"`
-	Unmodeled      []string `json:"unmodeled,omitempty"`
-	Unknown        []string `json:"unknown,omitempty"`
+	Name            string   `json:"name"`
+	Iter            int      `json:"iter"`
+	Instructions    int      `json:"instructions"`
+	FlashWords      int      `json:"flash_words"`
+	FlashBytes      int      `json:"flash_bytes"`
+	CyclesMin       int      `json:"cycles_min"`
+	CyclesMax       int      `json:"cycles_max"`
+	CyclesMinTotal  int      `json:"cycles_min_total"`
+	CyclesMaxTotal  int      `json:"cycles_max_total"`
+	PeakStackBytes  int      `json:"peak_stack_bytes"`
+	PeakPushBytes   int      `json:"peak_push_bytes"`
+	PeakCallBytes   int      `json:"peak_call_bytes"`
+	Pushes          int      `json:"pushes"`
+	Pops            int      `json:"pops"`
+	Calls           int      `json:"calls"`
+	UnresolvedCalls int      `json:"unresolved_calls,omitempty"`
+	RecursiveCalls  int      `json:"recursive_calls,omitempty"`
+	Unavailable     []string `json:"unavailable,omitempty"`
+	Unmodeled       []string `json:"unmodeled,omitempty"`
+	Unknown         []string `json:"unknown,omitempty"`
 }
 
 func keysOf(m map[string]int) []string {
@@ -1251,6 +1386,7 @@ func toJSON(m analyze.Metrics) jsonMetrics {
 		CyclesMinTotal: m.CyclesMin * iter, CyclesMaxTotal: m.CyclesMax * iter,
 		PeakStackBytes: m.PeakStackBytes, PeakPushBytes: m.PeakPushBytes, PeakCallBytes: m.PeakCallBytes,
 		Pushes: m.Pushes, Pops: m.Pops, Calls: m.Calls,
+		UnresolvedCalls: m.UnresolvedCalls, RecursiveCalls: m.RecursiveCalls,
 		Unavailable: keysOf(m.Unavailable),
 		Unmodeled:   keysOf(m.Unmodeled),
 		Unknown:     keysOf(m.Unknown),
@@ -1283,11 +1419,13 @@ func emitJSON(res analyze.Result, rng, sym *analyze.Metrics, path string, budget
 		Symbol     *jsonMetrics  `json:"symbol,omitempty"`
 		Ranking    []rankedJSON  `json:"ranking,omitempty"`
 		SRAMStatic int           `json:"sram_static_bytes"`
+		Warnings   []string      `json:"warnings,omitempty"`
 		Budgets    []budgetCheck `json:"budgets,omitempty"`
 	}{
 		File: path, BranchMode: *flBranches, Target: targetJSON(res.Target),
 		WholeFile: toJSON(res.File), SRAMStatic: res.SRAMStatic,
-		Budgets: budgets,
+		Warnings: res.Warnings,
+		Budgets:  budgets,
 	}
 	for _, r := range res.Regions {
 		out.Regions = append(out.Regions, toJSON(r))
