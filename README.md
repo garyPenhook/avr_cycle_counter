@@ -1,5 +1,7 @@
 # cyclecount
 
+[![Go](https://github.com/garyPenhook/avr_cycle_counter/actions/workflows/go.yml/badge.svg)](https://github.com/garyPenhook/avr_cycle_counter/actions/workflows/go.yml)
+
 A small console tool that helps you **prove an AVR assembly optimisation from
 the instruction listing** before you trust it.
 
