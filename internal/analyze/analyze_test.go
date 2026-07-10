@@ -109,6 +109,9 @@ tab:	.word 1, 2, 3
 	if res.SRAMStatic != 38 {
 		t.Errorf("sram static = %d, want 38", res.SRAMStatic)
 	}
+	if res.File.FlashDataBytes != 6 {
+		t.Errorf("initialized .data flash bytes = %d, want 6", res.File.FlashDataBytes)
+	}
 }
 
 // .comm/.lcomm reserve BSS storage even while the .text section is in effect,
@@ -254,6 +257,9 @@ skip:
 	if m.CyclesMin != 5 || m.CyclesMax != 5 {
 		t.Fatalf("cycles = %d-%d, want 5", m.CyclesMin, m.CyclesMax)
 	}
+	if m.FlashWords != 5 {
+		t.Fatalf("flash words = %d, want static footprint 5", m.FlashWords)
+	}
 }
 
 func TestBranchModeTakenFollowsForwardBranch(t *testing.T) {
@@ -326,6 +332,11 @@ done:
 	notTaken := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchNotTaken).File
 	if notTaken.CyclesMin != 8 || notTaken.CyclesMax != 8 {
 		t.Fatalf("not-taken = %d-%d, want 8", notTaken.CyclesMin, notTaken.CyclesMax)
+	}
+
+	bounds := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchBounds).File
+	if bounds.CyclesMin != 7 || bounds.CyclesMax != 8 {
+		t.Fatalf("bounds = %d-%d, want reachable 7-8", bounds.CyclesMin, bounds.CyclesMax)
 	}
 }
 
@@ -406,6 +417,41 @@ loop:
 	}
 	if m.CyclesMin != 13 || m.CyclesMax != 13 {
 		t.Fatalf("cycles = %d-%d, want 13", m.CyclesMin, m.CyclesMax)
+	}
+}
+
+func TestBranchScenarioLoopStackUsesVisitOrder(t *testing.T) {
+	src := `loop:
+	push r16
+	brne loop
+	ret
+`
+	m := analyze.AnalyzeOptions(asm.Parse(src), attiny3217, analyze.Options{
+		BranchPlan: analyze.BranchPlan{Trips: map[string]int{"loop": 3}},
+	}).File
+	if m.PeakStackBytes != 3 {
+		t.Fatalf("peak stack = %d, want 3 repeated pushes", m.PeakStackBytes)
+	}
+}
+
+func TestValidateOptionsRejectsUnknownScenarioKey(t *testing.T) {
+	lines := asm.Parse("loop:\n dec r16\n brne loop\n ret\n")
+	err := analyze.ValidateOptions(lines, analyze.Options{BranchPlan: analyze.BranchPlan{
+		Trips: map[string]int{"typo": 10},
+	}})
+	if err == nil {
+		t.Fatal("unknown branch-scenario key accepted")
+	}
+}
+
+func TestPathVisitsAloneDoesNotPruneBounds(t *testing.T) {
+	lines := asm.Parse("loop:\n dec r16\n brne loop\n ret\n")
+	m := analyze.AnalyzeOptions(lines, attiny3217, analyze.Options{
+		BranchMode: analyze.BranchBounds,
+		BranchPlan: analyze.BranchPlan{MaxVisits: 2},
+	}).File
+	if m.CyclesMin != 6 || m.CyclesMax != 7 {
+		t.Fatalf("cycles = %d-%d, want bounds 6-7", m.CyclesMin, m.CyclesMax)
 	}
 }
 
@@ -514,6 +560,9 @@ func TestRecursiveCallDoesNotLoopForever(t *testing.T) {
 	}
 	if m.RecursiveCalls != 1 {
 		t.Fatalf("recursive calls = %d, want 1", m.RecursiveCalls)
+	}
+	if !m.StackUnbounded {
+		t.Fatal("recursive stack not marked unbounded")
 	}
 }
 
@@ -701,5 +750,49 @@ Disassembly of section .text:
 	}
 	if res.SRAMStatic != 3 {
 		t.Fatalf("static SRAM = %d, want 3", res.SRAMStatic)
+	}
+}
+
+func TestAnalyzeCountsInitializedDataInFlashAndSRAM(t *testing.T) {
+	lines := asm.ParseObjdump(`
+Sections:
+Idx Name          Size      VMA       LMA       File off  Algn
+  0 .text         00000002  00000000  00000000  00000034  2**0
+  1 .data         00000006  00800100  00000002  00000036  2**0
+
+Disassembly of section .text:
+00000000 <f>:
+   0:  08 95        ret
+`)
+	res := analyze.Analyze(lines, attiny3217)
+	if res.File.FlashBytes() != 8 || res.SRAMStatic != 6 {
+		t.Fatalf("flash/SRAM = %d/%d, want 8/6", res.File.FlashBytes(), res.SRAMStatic)
+	}
+}
+
+func TestObjdumpAddressOnlyBranchTarget(t *testing.T) {
+	lines := asm.ParseObjdump(`
+Disassembly of section .text:
+   0:  01 f4        brne .+2 ; 0x2
+   2:  08 95        ret
+`)
+	m := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchTaken).File
+	if m.InstrCount != 2 || m.CyclesMin != 6 {
+		t.Fatalf("address-only taken path = %d instructions/%d cycles, want 2/6", m.InstrCount, m.CyclesMin)
+	}
+}
+
+func TestObjdumpRelocationOverridesPlaceholderAddress(t *testing.T) {
+	lines := asm.ParseObjdump(`
+Disassembly of section .text:
+   0:  01 f4        brne .+0 ; 0x2
+            0: R_AVR_7_PCREL .Ldone
+   2:  00 00        nop
+00000004 <.Ldone>:
+   4:  08 95        ret
+`)
+	m := analyze.AnalyzeMode(lines, attiny3217, analyze.BranchTaken).File
+	if m.InstrCount != 2 || m.CyclesMin != 6 {
+		t.Fatalf("relocated taken path = %d instructions/%d cycles, want branch+ret = 2/6", m.InstrCount, m.CyclesMin)
 	}
 }

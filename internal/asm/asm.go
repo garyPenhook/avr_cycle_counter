@@ -25,6 +25,9 @@ type Line struct {
 	Num           int
 	Raw           string
 	Section       string // section in effect for this line (default ".text")
+	Address       uint64 // byte address for disassembled input
+	HasAddress    bool   // Address is meaningful for disassembled input
+	RelocTarget   string // objdump relocation target for relocatable objects
 	Label         string
 	Mnemonic      string // upper-cased, for instructions
 	Operands      string
@@ -135,7 +138,7 @@ func splitComment(line string) (code, comment string) {
 	inStr := false
 	for i := 0; i < len(line); i++ {
 		c := line[i]
-		if c == '"' && (i == 0 || line[i-1] != '\\') {
+		if c == '"' && !isEscaped(line, i) {
 			inStr = !inStr
 			continue
 		}
@@ -150,6 +153,17 @@ func splitComment(line string) (code, comment string) {
 		}
 	}
 	return line, ""
+}
+
+// isEscaped reports whether s[pos] is preceded by an odd-length run of
+// backslashes. A quote after two backslashes closes a string; checking only the
+// immediately preceding byte incorrectly treats it as escaped.
+func isEscaped(s string, pos int) bool {
+	n := 0
+	for i := pos - 1; i >= 0 && s[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 // parseAnnotations reads "@begin [name] [iter=N]" and "@end [name]" tokens.

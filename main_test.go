@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -430,12 +431,37 @@ func TestRenderSingleCSV(t *testing.T) {
 	*flBranches = "bounds"
 	*flRank, *flRankBy = 1, "cycles"
 	var buf bytes.Buffer
-	renderSingleCSV(&buf, run, "firmware.o")
+	if err := renderSingleCSV(&buf, run, "firmware.o"); err != nil {
+		t.Fatal(err)
+	}
 	out := buf.String()
 	for _, s := range []string{"file,scope_type,scope_name", "firmware.o,whole_file,(whole file)", "firmware.o,region,inner", "firmware.o,ranked_symbol,toggle_pin"} {
 		if !strings.Contains(out, s) {
 			t.Fatalf("csv missing %q:\n%s", s, out)
 		}
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestRenderSingleCSVReturnsWriteError(t *testing.T) {
+	run := analysisRun{Target: isaTarget("ATtiny3217", isa.VarAVRxt, 2)}
+	if err := renderSingleCSV(failingWriter{}, run, "firmware.o"); err == nil {
+		t.Fatal("CSV write failure was ignored")
+	}
+}
+
+func TestCycleTotalSaturatesOverflow(t *testing.T) {
+	got, overflow := cycleTotal(4, int(^uint(0)>>1))
+	if !overflow || got != int(^uint(0)>>1) {
+		t.Fatalf("cycleTotal overflow = %d,%t; want MaxInt,true", got, overflow)
+	}
+	res := analyze.Result{File: analyze.Metrics{CyclesMax: 4, Iter: int(^uint(0) >> 1)}}
+	checks := evalBudgets(budgets{cycles: 1}, res, nil, nil)
+	if len(checks) != 1 || checks[0].OK {
+		t.Fatalf("overflowed budget should fail closed: %+v", checks)
 	}
 }
 
@@ -480,6 +506,56 @@ func TestRenderSingleGHA(t *testing.T) {
 		if !strings.Contains(out, s) {
 			t.Fatalf("gha missing %q:\n%s", s, out)
 		}
+	}
+}
+
+func TestRenderSingleGHADoesNotRankWhenDisabled(t *testing.T) {
+	run := analysisRun{
+		Target: isaTarget("ATtiny3217", isa.VarAVRxt, 2),
+		Result: analyze.Result{Symbols: []analyze.Metrics{{Name: "f", CyclesMax: 1}}},
+	}
+	oldRank := *flRank
+	t.Cleanup(func() { *flRank = oldRank })
+	*flRank = 0
+	var buf bytes.Buffer
+	renderSingleGHA(&buf, run, "firmware.o", 0)
+	if strings.Contains(buf.String(), "cyclecount ranking") {
+		t.Fatalf("ranking notice emitted with -rank=0:\n%s", buf.String())
+	}
+}
+
+func TestRankingRowsCarryFieldsOnlyOnRankedRows(t *testing.T) {
+	run := analysisRun{
+		Target: isaTarget("ATtiny3217", isa.VarAVRxt, 2),
+		Result: analyze.Result{
+			Regions: []analyze.Metrics{{Name: "hot", CyclesMax: 3}},
+			Symbols: []analyze.Metrics{{Name: "f", CyclesMax: 5}},
+		},
+	}
+	oldRank, oldRankBy := *flRank, *flRankBy
+	t.Cleanup(func() { *flRank, *flRankBy = oldRank, oldRankBy })
+	*flRank, *flRankBy = 1, "cycles"
+	rows := singleRows(run, "firmware.o")
+	for _, row := range rows {
+		if strings.HasPrefix(row[1], "ranked_") {
+			if row[15] != "cycles" || row[16] == "" {
+				t.Fatalf("ranked row missing rank fields: %v", row)
+			}
+		} else if row[15] != "" || row[16] != "" {
+			t.Fatalf("ordinary row has rank fields: %v", row)
+		}
+	}
+	var buf bytes.Buffer
+	renderSingleMD(&buf, run, "firmware.o", 0)
+	if strings.Count(buf.String(), "| region:hot |") != 1 {
+		t.Fatalf("region duplicated in Markdown:\n%s", buf.String())
+	}
+}
+
+func TestRecursiveStackJSONIsExplicitlyUnbounded(t *testing.T) {
+	j := toJSON(analyze.Metrics{PeakStackBytes: 2, RecursiveCalls: 1, StackUnbounded: true})
+	if !j.StackUnbounded {
+		t.Fatal("JSON did not mark recursive stack unbounded")
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultPDF = "https://ww1.microchip.com/downloads/en/DeviceDoc/AVR-InstructionSet-Manual-DS40002198.pdf"
@@ -72,7 +73,12 @@ func loadText(pdfURL, textPath string) (string, error) {
 	defer os.RemoveAll(tmpDir)
 
 	pdfPath := filepath.Join(tmpDir, "manual.pdf")
-	resp, err := http.Get(pdfURL)
+	req, err := http.NewRequest(http.MethodGet, pdfURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "cyclecount-device-db-generator/1.0")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -137,7 +143,8 @@ func parseRows(text string) ([]row, error) {
 				!strings.HasPrefix(next, "Table ") && !strings.HasPrefix(next, "Appendix ") &&
 				!strings.HasPrefix(next, "Device") && !strings.HasPrefix(next, "Core") &&
 				!strings.HasPrefix(next, "Missing Instructions") && !strings.HasPrefix(next, "©") &&
-				!strings.HasPrefix(next, "Manual") && !strings.HasPrefix(next, "DS40002198") &&
+				!strings.HasPrefix(next, "Manual") && !strings.HasPrefix(next, "Migration Guide") &&
+				!strings.HasPrefix(next, "Microchip") && !strings.HasPrefix(next, "DS40002198") &&
 				!regexp.MustCompile(`^7\.\d`).MatchString(next) {
 				for _, mn := range normalizeMissing(next) {
 					mn = strings.TrimSpace(mn)
@@ -148,21 +155,45 @@ func parseRows(text string) ([]row, error) {
 				k++
 			}
 		}
+		missing = applyManualErrata(name, missing)
 		flashKB, pcBytes, ok := deriveFlashAndPC(name)
-		if ok {
-			rows = append(rows, row{
-				Name:    strings.ToUpper(name),
-				Variant: variant,
-				Missing: missing,
-				FlashKB: flashKB,
-				PCBytes: pcBytes,
-			})
+		if !ok {
+			// Appendix A is authoritative for device/core/missing-instruction
+			// coverage even when the part number does not encode flash size in a
+			// form this helper recognizes. Keep the device with unknown flash and
+			// the ordinary 16-bit PC default instead of silently discarding it.
+			flashKB, pcBytes = 0, 2
 		}
+		rows = append(rows, row{
+			Name:    strings.ToUpper(name),
+			Variant: variant,
+			Missing: missing,
+			FlashKB: flashKB,
+			PCBytes: pcBytes,
+		})
 		i = k
 	}
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return dedupe(rows), nil
+}
+
+// applyManualErrata keeps generation from an older mirrored PDF aligned with
+// DS40002198C. Revision C removed the erroneous LPM missing entries for the
+// original-core ATtiny11/12/15 devices.
+func applyManualErrata(name string, missing []string) []string {
+	switch strings.ToUpper(name) {
+	case "ATTINY11", "ATTINY12", "ATTINY15":
+		out := missing[:0]
+		for _, m := range missing {
+			if m != "LPM" && m != "LPM Z+" {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return missing
+	}
 }
 
 func nextNonEmpty(lines []string, start int) int {

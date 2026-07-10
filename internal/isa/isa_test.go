@@ -1,6 +1,7 @@
 package isa_test
 
 import (
+	"strings"
 	"testing"
 
 	"cyclecount/internal/isa"
@@ -51,6 +52,11 @@ func TestCycles(t *testing.T) {
 		{"BRNE", isa.VarAVRxt, 2, 1, 2, true},
 		{"MUL", isa.VarAVRrc, 2, 0, 0, false}, // no multiplier on reduced core
 		{"SPM", isa.VarAVRe, 2, 0, 0, false},  // recognized but not cycle-modeled
+		{"XCH", isa.VarAVRxm, 2, 2, 2, true},
+		{"LAC", isa.VarAVRxm, 2, 2, 2, true},
+		{"LAS", isa.VarAVRxm, 2, 2, 2, true},
+		{"LAT", isa.VarAVRxm, 2, 2, 2, true},
+		{"DES", isa.VarAVRxm, 2, 1, 2, true},
 	}
 	for _, c := range cases {
 		info, ok := isa.Lookup(c.mn)
@@ -123,6 +129,7 @@ func TestAvailableOnTarget(t *testing.T) {
 		{"attiny26", "CALL", false}, // original AVR core lacks CALL/JMP (Table 7-1)
 		{"attiny40", "BREAK", true},
 		{"attiny10", "BREAK", false},
+		{"at90can32", "ELPM", false},
 	}
 	for _, c := range cases {
 		d, ok := isa.LookupDevice(c.device)
@@ -145,6 +152,12 @@ func TestAvailableOnTargetForm(t *testing.T) {
 	}
 	if !isa.AvailableOnTargetForm("LPM", "", d.Variant, d.PCBytes, d.FlashKB, d.Missing) {
 		t.Fatal("LPM should be available on ATtiny11 per DS40002198C")
+	}
+	if isa.AvailableOnTargetForm("LPM", "r16, Z+", d.Variant, d.PCBytes, d.FlashKB, d.Missing) {
+		t.Fatal("LPM r16,Z+ should be unavailable on original AVR/ATtiny11")
+	}
+	if !isa.AvailableOnTargetForm("LPM", "r16, Z+", isa.VarAVRe, 2, 8, nil) {
+		t.Fatal("LPM r16,Z+ should be available on AVRe")
 	}
 
 	if isa.AvailableOnTargetForm("SPM", "Z+", isa.VarAVRe, 2, 8, nil) {
@@ -173,6 +186,17 @@ func TestDevicesSortedAndConsistent(t *testing.T) {
 		got, ok := isa.LookupDevice(d.Name)
 		if !ok || got.Variant != d.Variant || got.PCBytes != d.PCBytes || got.FlashKB != d.FlashKB {
 			t.Errorf("LookupDevice(%q) = %+v,%t; want %+v", d.Name, got, ok, d)
+		}
+	}
+}
+
+func TestGeneratedMissingInstructionsAreKnown(t *testing.T) {
+	for _, d := range isa.Devices() {
+		for form := range d.Missing {
+			mn := strings.Fields(form)[0]
+			if _, ok := isa.Lookup(mn); !ok {
+				t.Errorf("%s has unknown missing-instruction entry %q", d.Name, form)
+			}
 		}
 	}
 }

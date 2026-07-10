@@ -168,10 +168,10 @@ func init() {
 	// --- MCU control (Table 5-6) --------------------------------------
 	add(1, one, one, one, one, "", "NOP", "SLEEP", "WDR", "BREAK")
 
-	// --- Recognized but not cycle-modeled (data / NVM-timing dependent) ---
+	// --- Recognized but not cycle-modeled (NVM-timing dependent) -----------
 	addSpecial(1, "programming-time dependent", "SPM")
-	addSpecial(1, "AVRxm read-modify-write", "XCH", "LAC", "LAS", "LAT")
-	addSpecial(1, "AVRxm DES round", "DES")
+	add(1, na(), c1(2), na(), na(), "AVRxm read-modify-write", "XCH", "LAC", "LAS", "LAT")
+	add(1, na(), cr(1, 2), na(), na(), "AVRxm DES round: 1 cycle after DES, otherwise 2", "DES")
 }
 
 func addRC(words, wordsRC int, e, xm, xt, rc CC, note string, mnemonics ...string) {
@@ -275,6 +275,10 @@ func init() {
 	// AVRe/AVRe+. Modeled as a form-qualified entry so AvailableOnTargetForm
 	// distinguishes "spm" from "spm Z+".
 	avail([]string{"SPM Z+"}, VarAVRxm, VarAVRxt)
+	// The operandless LPM exists on the original AVR core, but the enhanced
+	// destination-register forms begin with AVRe.
+	avail([]string{"LPM Z", "LPM Z+"},
+		VarAVRe, VarAVRePlus, VarAVRxm, VarAVRxt)
 	// CALL/JMP are absent on both the original AVR core and the Reduced Core
 	// (Table 7-1 Core Description: present only on AVRe/AVRe+/AVRxm/AVRxt).
 	// Device-specific omissions on enhanced parts are layered on via Appendix A.
@@ -346,7 +350,14 @@ func formKey(mnemonic, operands string) string {
 		if _, src, ok := strings.Cut(ops, ","); ok {
 			return mnemonic + " " + strings.TrimSpace(src)
 		}
-	case "SPM", "LPM", "ELPM":
+	case "LPM", "ELPM":
+		if _, src, ok := strings.Cut(ops, ","); ok {
+			return mnemonic + " " + strings.TrimSpace(src)
+		}
+		if ops != "" {
+			return mnemonic + " " + strings.Fields(ops)[0]
+		}
+	case "SPM":
 		if ops != "" {
 			return mnemonic + " " + strings.Fields(ops)[0]
 		}

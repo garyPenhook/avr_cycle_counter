@@ -41,7 +41,9 @@ func (o CPPOptions) compiler() string {
 // is still GNU-assembler source, ready for Parse.
 func Preprocess(path string, o CPPOptions) (string, error) {
 	cc := o.compiler()
-	args := []string{"-E", "-x", "assembler-with-cpp"}
+	// -C preserves source comments so // and /* */ @begin/@end annotations remain
+	// available to the assembly parser after preprocessing.
+	args := []string{"-E", "-C", "-x", "assembler-with-cpp"}
 	if o.MMCU != "" {
 		args = append(args, "-mmcu="+o.MMCU)
 	}

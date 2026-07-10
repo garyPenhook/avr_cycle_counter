@@ -87,3 +87,10 @@ func TestParseHandlesOverlongLine(t *testing.T) {
 		t.Errorf("line 2 mnemonic = %q; want RET", lines[1].Mnemonic)
 	}
 }
+
+func TestParseCommentAfterEvenBackslashes(t *testing.T) {
+	lines := asm.Parse(".ascii \"\\\\\\\\\" // @begin hot\n")
+	if len(lines) != 1 || len(lines[0].RegionBegins) != 1 {
+		t.Fatalf("region begin lost after escaped string: %+v", lines)
+	}
+}

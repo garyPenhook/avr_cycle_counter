@@ -128,6 +128,11 @@ func fail(err error) {
 	os.Exit(1)
 }
 
+func failUsage(err error) {
+	fmt.Fprintln(os.Stderr, "cyclecount:", err)
+	os.Exit(2)
+}
+
 // version is overridable at build time with -ldflags "-X main.version=...".
 var version = ""
 
@@ -345,6 +350,9 @@ func analyzeForTarget(lines []*asm.Line, target analyze.Target) (analysisRun, er
 	if err != nil {
 		return run, err
 	}
+	if err := analyze.ValidateOptions(lines, opts); err != nil {
+		return run, err
+	}
 	run.Result = analyze.AnalyzeOptions(lines, target, opts)
 	if *flFrom != "" || *flTo != "" {
 		m, err := analyze.RangeMetricsOptions(lines, *flFrom, *flTo, *flIter, target, opts)
@@ -478,8 +486,27 @@ func rankMetricValue(m analyze.Metrics) int {
 	case "stack":
 		return m.PeakStackBytes
 	default:
-		return m.CyclesMax * max(m.Iter, 1)
+		v, _ := cycleTotal(m.CyclesMax, max(m.Iter, 1))
+		return v
 	}
+}
+
+func cycleTotal(cycles, iter int) (int, bool) {
+	if cycles < 0 || iter < 0 {
+		return 0, true
+	}
+	maxInt := int(^uint(0) >> 1)
+	if cycles != 0 && iter > maxInt/cycles {
+		return maxInt, true
+	}
+	return cycles * iter, false
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func rankMetricLabel() string {
@@ -540,10 +567,10 @@ func main() {
 	if len(files) > 1 {
 		for _, a := range files[1:] {
 			if strings.HasPrefix(a, "-") {
-				fail(fmt.Errorf("unexpected argument %q — flags must come before the file", a))
+				failUsage(fmt.Errorf("unexpected argument %q — flags must come before the file", a))
 			}
 		}
-		fail(fmt.Errorf("expected one file, got %d: %s", len(files), strings.Join(files, " ")))
+		failUsage(fmt.Errorf("expected one file, got %d: %s", len(files), strings.Join(files, " ")))
 	}
 	path := files[0]
 
@@ -594,11 +621,16 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
+		if err := analyze.ValidateOptions(blines, opts); err != nil {
+			fail(fmt.Errorf("baseline: %w", err))
+		}
 		bres := analyze.AnalyzeOptions(blines, run.Target, opts)
 		if format == fmtJSON {
 			emitCompareJSON(run.Result, bres, path, *flVS, run.Budgets)
 		} else if format == fmtCSV {
-			renderCompareCSV(os.Stdout, run.Result, bres, path, *flVS, run.Budgets)
+			if err := renderCompareCSV(os.Stdout, run.Result, bres, path, *flVS, run.Budgets); err != nil {
+				fail(err)
+			}
 		} else if format == fmtMD {
 			renderCompareMD(os.Stdout, run.Result, bres, path, *flVS, *flClock, run.Budgets)
 		} else if format == fmtGHA {
@@ -619,7 +651,9 @@ func main() {
 		if format == fmtJSON {
 			emitMatrixJSON(runs, path)
 		} else if format == fmtCSV {
-			renderMatrixCSV(os.Stdout, runs, path)
+			if err := renderMatrixCSV(os.Stdout, runs, path); err != nil {
+				fail(err)
+			}
 		} else if format == fmtMD {
 			renderMatrixMD(os.Stdout, runs, path, *flClock)
 		} else if format == fmtGHA {
@@ -635,7 +669,9 @@ func main() {
 	if format == fmtJSON {
 		emitJSON(run.Result, run.Range, run.Symbol, path, run.Budgets)
 	} else if format == fmtCSV {
-		renderSingleCSV(os.Stdout, run, path)
+		if err := renderSingleCSV(os.Stdout, run, path); err != nil {
+			fail(err)
+		}
 	} else if format == fmtMD {
 		renderSingleMD(os.Stdout, run, path, *flClock)
 	} else if format == fmtGHA {
@@ -818,7 +854,7 @@ func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float
 	fmt.Fprintf(w, "  Instructions   : %d\n", m.InstrCount)
 	fmt.Fprintf(w, "  Flash          : %d bytes (%d words)\n", m.FlashBytes(), m.FlashWords)
 	if m.FlashDataBytes > 0 {
-		fmt.Fprintf(w, "                   %d B code + %d B inline data\n", m.FlashWords*2, m.FlashDataBytes)
+		fmt.Fprintf(w, "                   %d B code + %d B flash-resident data\n", m.FlashWords*2, m.FlashDataBytes)
 	}
 
 	if m.CyclesMin == m.CyclesMax {
@@ -827,11 +863,19 @@ func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float
 		fmt.Fprintf(w, "  Cycles/pass    : %d – %d  (min–max)\n", m.CyclesMin, m.CyclesMax)
 	}
 	if iter > 1 {
-		fmt.Fprintf(w, "  Cycles × %-6d: %d – %d\n", iter, m.CyclesMin*iter, m.CyclesMax*iter)
+		loTotal, loOverflow := cycleTotal(m.CyclesMin, iter)
+		hiTotal, hiOverflow := cycleTotal(m.CyclesMax, iter)
+		suffix := ""
+		if loOverflow || hiOverflow {
+			suffix = " (overflow; saturated)"
+		}
+		fmt.Fprintf(w, "  Cycles × %-6d: %d – %d%s\n", iter, loTotal, hiTotal, suffix)
 	}
 	if clock > 0 {
-		lo := fmtTime(m.CyclesMin*iter, clock)
-		hi := fmtTime(m.CyclesMax*iter, clock)
+		loTotal, _ := cycleTotal(m.CyclesMin, iter)
+		hiTotal, _ := cycleTotal(m.CyclesMax, iter)
+		lo := fmtTime(loTotal, clock)
+		hi := fmtTime(hiTotal, clock)
 		if lo == hi {
 			fmt.Fprintf(w, "  Time @%gMHz    : %s\n", clock, lo)
 		} else {
@@ -840,7 +884,11 @@ func renderMetrics(w io.Writer, m analyze.Metrics, t analyze.Target, clock float
 	}
 
 	if m.Pushes > 0 || m.Pops > 0 || m.Calls > 0 {
-		fmt.Fprintf(w, "  Stack (SRAM)   : peak %d B (%d PUSH / %d POP)", m.PeakStackBytes, m.Pushes, m.Pops)
+		if m.StackUnbounded {
+			fmt.Fprintf(w, "  Stack (SRAM)   : unbounded (observed lower bound %d B; %d PUSH / %d POP)", m.PeakStackBytes, m.Pushes, m.Pops)
+		} else {
+			fmt.Fprintf(w, "  Stack (SRAM)   : peak %d B (%d PUSH / %d POP)", m.PeakStackBytes, m.Pushes, m.Pops)
+		}
 		if m.Calls > 0 {
 			fmt.Fprintf(w, ", %d call(s)", m.Calls)
 			if m.PeakPushBytes > 0 || m.PeakCallBytes > 0 {
@@ -1003,20 +1051,21 @@ func cycleCell(m analyze.Metrics) string {
 	return fmt.Sprintf("%d-%d", m.CyclesMin, m.CyclesMax)
 }
 
-func renderSingleCSV(w io.Writer, run analysisRun, path string) {
+func renderSingleCSV(w io.Writer, run analysisRun, path string) error {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"file", "scope_type", "scope_name", "target", "core", "pc_bits", "instructions", "cycles_min", "cycles_max", "flash_bytes", "peak_stack_bytes", "peak_push_bytes", "peak_call_bytes", "static_sram_bytes", "branch_mode", "rank_kind", "rank_value"})
+	_ = cw.Write([]string{"file", "scope_type", "scope_name", "target", "core", "pc_bits", "instructions", "cycles_min", "cycles_max", "flash_bytes", "peak_stack_bytes", "peak_push_bytes", "peak_call_bytes", "static_sram_bytes", "branch_mode", "rank_kind", "rank_value", "stack_unbounded"})
 	for _, row := range singleRows(run, path) {
 		_ = cw.Write(row)
 	}
 	cw.Flush()
+	return cw.Error()
 }
 
 func singleRows(run analysisRun, path string) [][]string {
 	var rows [][]string
 	add := func(kind string, m analyze.Metrics) {
 		rankKind, rankValue := "", ""
-		if *flRank > 0 && (kind == "symbol" || kind == "region") {
+		if *flRank > 0 && strings.HasPrefix(kind, "ranked_") {
 			rankKind, rankValue = *flRankBy, fmt.Sprintf("%d", rankMetricValue(m))
 		}
 		rows = append(rows, []string{
@@ -1024,6 +1073,7 @@ func singleRows(run analysisRun, path string) [][]string {
 			fmt.Sprintf("%d", m.InstrCount), fmt.Sprintf("%d", m.CyclesMin), fmt.Sprintf("%d", m.CyclesMax),
 			fmt.Sprintf("%d", m.FlashBytes()), fmt.Sprintf("%d", m.PeakStackBytes), fmt.Sprintf("%d", m.PeakPushBytes),
 			fmt.Sprintf("%d", m.PeakCallBytes), fmt.Sprintf("%d", run.Result.SRAMStatic), *flBranches, rankKind, rankValue,
+			fmt.Sprintf("%t", m.StackUnbounded),
 		})
 	}
 	add("whole_file", run.Result.File)
@@ -1044,7 +1094,7 @@ func singleRows(run analysisRun, path string) [][]string {
 	return rows
 }
 
-func renderMatrixCSV(w io.Writer, runs []analysisRun, path string) {
+func renderMatrixCSV(w io.Writer, runs []analysisRun, path string) error {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"file", "scope", "target", "core", "pc_bits", "instructions", "cycles_min", "cycles_max", "flash_bytes", "peak_stack_bytes", "peak_push_bytes", "peak_call_bytes", "static_sram_bytes", "notes", "branch_mode"})
 	for _, run := range runs {
@@ -1057,9 +1107,10 @@ func renderMatrixCSV(w io.Writer, runs []analysisRun, path string) {
 		})
 	}
 	cw.Flush()
+	return cw.Error()
 }
 
-func renderCompareCSV(w io.Writer, neu, base analyze.Result, np, bp string, budgets []budgetCheck) {
+func renderCompareCSV(w io.Writer, neu, base analyze.Result, np, bp string, budgets []budgetCheck) error {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"metric", "baseline_file", "baseline", "new_file", "new", "delta"})
 	write := func(metric string, b, n int) {
@@ -1071,12 +1122,14 @@ func renderCompareCSV(w io.Writer, neu, base analyze.Result, np, bp string, budg
 	write("flash_bytes", base.File.FlashBytes(), neu.File.FlashBytes())
 	write("sram_static_bytes", base.SRAMStatic, neu.SRAMStatic)
 	write("peak_stack_bytes", base.File.PeakStackBytes, neu.File.PeakStackBytes)
+	write("stack_unbounded", boolInt(base.File.StackUnbounded), boolInt(neu.File.StackUnbounded))
 	// Budget rows reuse the columns: "baseline" carries the limit, "new" the
 	// measured value, so a positive delta means the limit was exceeded.
 	for _, bgt := range budgets {
 		write("budget:"+bgt.Name, bgt.Limit, bgt.Got)
 	}
 	cw.Flush()
+	return cw.Error()
 }
 
 func renderSingleMD(w io.Writer, run analysisRun, path string, clock float64) {
@@ -1088,8 +1141,15 @@ func renderSingleMD(w io.Writer, run analysisRun, path string, clock float64) {
 	fmt.Fprintln(w, "\n| Scope | Instructions | Cycles/pass | Flash | Peak Stack | Static SRAM |")
 	fmt.Fprintln(w, "| --- | ---: | ---: | ---: | ---: | ---: |")
 	for _, row := range singleRows(run, path) {
-		fmt.Fprintf(w, "| %s:%s | %s | %s-%s | %s B | %s B | %s B |\n",
-			row[1], row[2], row[6], row[7], row[8], row[9], row[10], row[13])
+		if strings.HasPrefix(row[1], "ranked_") {
+			continue
+		}
+		stack := row[10] + " B"
+		if row[17] == "true" {
+			stack = "unbounded"
+		}
+		fmt.Fprintf(w, "| %s:%s | %s | %s-%s | %s B | %s | %s B |\n",
+			row[1], row[2], row[6], row[7], row[8], row[9], stack, row[13])
 	}
 	if len(run.Budgets) > 0 {
 		fmt.Fprintln(w, "\n## Budgets")
@@ -1140,6 +1200,9 @@ func renderCompareMD(w io.Writer, neu, base analyze.Result, np, bp string, clock
 	row("flash bytes", base.File.FlashBytes(), neu.File.FlashBytes(), "")
 	row("static SRAM", base.SRAMStatic, neu.SRAMStatic, "")
 	row("peak stack", base.File.PeakStackBytes, neu.File.PeakStackBytes, "")
+	if base.File.StackUnbounded || neu.File.StackUnbounded {
+		fmt.Fprintf(w, "| stack bounded | %t | %t | — |\n", !base.File.StackUnbounded, !neu.File.StackUnbounded)
+	}
 	if len(budgets) > 0 {
 		fmt.Fprintln(w, "\n## Budgets")
 		fmt.Fprintln(w, "| Name | Got | Limit | Scope | OK |")
@@ -1159,8 +1222,10 @@ func renderSingleGHA(w io.Writer, run analysisRun, path string, clock float64) {
 			fmt.Fprintf(w, "::error title=cyclecount budget exceeded::%s %d%s exceeds limit %d%s (%s)\n", b.Name, b.Got, b.Unit, b.Limit, b.Unit, b.Scope)
 		}
 	}
-	for _, r := range topRanked(run.Result) {
-		fmt.Fprintf(w, "::notice title=cyclecount ranking::%s %s ranks at %d %s\n", r.Kind, r.Metrics.Name, rankMetricValue(r.Metrics), rankMetricLabel())
+	if *flRank > 0 {
+		for _, r := range topRanked(run.Result) {
+			fmt.Fprintf(w, "::notice title=cyclecount ranking::%s %s ranks at %d %s\n", r.Kind, r.Metrics.Name, rankMetricValue(r.Metrics), rankMetricLabel())
+		}
 	}
 }
 
@@ -1197,6 +1262,9 @@ func matrixNotes(m analyze.Metrics) string {
 	}
 	if m.RecursiveCalls > 0 {
 		notes = append(notes, fmt.Sprintf("recursive_calls=%d", m.RecursiveCalls))
+	}
+	if m.StackUnbounded {
+		notes = append(notes, "stack=unbounded")
 	}
 	if len(notes) == 0 {
 		return "-"
@@ -1263,7 +1331,7 @@ func evalBudgets(b budgets, res analyze.Result, rng, sym *analyze.Metrics) []bud
 		} else if rng != nil {
 			m, scope = *rng, "range "+rng.Name
 		}
-		got := m.CyclesMax * max(m.Iter, 1)
+		got, _ := cycleTotal(m.CyclesMax, max(m.Iter, 1))
 		out = append(out, budgetCheck{"cycles", b.cycles, got, "", scope, got <= b.cycles})
 	}
 	if b.flash > 0 {
@@ -1356,6 +1424,7 @@ type jsonMetrics struct {
 	CyclesMax       int      `json:"cycles_max"`
 	CyclesMinTotal  int      `json:"cycles_min_total"`
 	CyclesMaxTotal  int      `json:"cycles_max_total"`
+	TotalsOverflow  bool     `json:"totals_overflow,omitempty"`
 	PeakStackBytes  int      `json:"peak_stack_bytes"`
 	PeakPushBytes   int      `json:"peak_push_bytes"`
 	PeakCallBytes   int      `json:"peak_call_bytes"`
@@ -1364,6 +1433,7 @@ type jsonMetrics struct {
 	Calls           int      `json:"calls"`
 	UnresolvedCalls int      `json:"unresolved_calls,omitempty"`
 	RecursiveCalls  int      `json:"recursive_calls,omitempty"`
+	StackUnbounded  bool     `json:"stack_unbounded,omitempty"`
 	Unavailable     []string `json:"unavailable,omitempty"`
 	Unmodeled       []string `json:"unmodeled,omitempty"`
 	Unknown         []string `json:"unknown,omitempty"`
@@ -1378,15 +1448,17 @@ func keysOf(m map[string]int) []string {
 
 func toJSON(m analyze.Metrics) jsonMetrics {
 	iter := max(m.Iter, 1)
+	minTotal, minOverflow := cycleTotal(m.CyclesMin, iter)
+	maxTotal, maxOverflow := cycleTotal(m.CyclesMax, iter)
 	return jsonMetrics{
 		Name: m.Name, Iter: iter,
 		Instructions: m.InstrCount,
 		FlashWords:   m.FlashWords, FlashBytes: m.FlashBytes(),
 		CyclesMin: m.CyclesMin, CyclesMax: m.CyclesMax,
-		CyclesMinTotal: m.CyclesMin * iter, CyclesMaxTotal: m.CyclesMax * iter,
+		CyclesMinTotal: minTotal, CyclesMaxTotal: maxTotal, TotalsOverflow: minOverflow || maxOverflow,
 		PeakStackBytes: m.PeakStackBytes, PeakPushBytes: m.PeakPushBytes, PeakCallBytes: m.PeakCallBytes,
 		Pushes: m.Pushes, Pops: m.Pops, Calls: m.Calls,
-		UnresolvedCalls: m.UnresolvedCalls, RecursiveCalls: m.RecursiveCalls,
+		UnresolvedCalls: m.UnresolvedCalls, RecursiveCalls: m.RecursiveCalls, StackUnbounded: m.StackUnbounded,
 		Unavailable: keysOf(m.Unavailable),
 		Unmodeled:   keysOf(m.Unmodeled),
 		Unknown:     keysOf(m.Unknown),
@@ -1598,6 +1670,7 @@ func buildSARIF(path string, runs []analysisRun, extras []sarifResult, mode stri
 		sarifRuleDef("instruction-unmodeled", "Instruction cycles not modeled"),
 		sarifRuleDef("instruction-unknown", "Instruction unknown to ISA table"),
 		sarifRuleDef("compare-regression", "Comparison regression"),
+		sarifRuleDef("stack-unbounded", "Stack use is unbounded"),
 	}
 	for _, ar := range runs {
 		run.Results = append(run.Results, sarifResultsForRun(ar, path, mode)...)
@@ -1640,6 +1713,11 @@ func sarifResultsForRun(run analysisRun, path, mode string) []sarifResult {
 		}
 	}
 	metrics := run.scopeMetrics()
+	if metrics.StackUnbounded {
+		out = append(out, sarifFinding("stack-unbounded", "error",
+			fmt.Sprintf("recursive/cyclic calls make stack use unbounded in %s", run.scopeLabel()), path,
+			sarifProps(run, mode, map[string]any{"recursive_calls": metrics.RecursiveCalls})))
+	}
 	collect("instruction-unavailable", "error", metrics.Unavailable)
 	collect("instruction-unmodeled", "warning", metrics.Unmodeled)
 	collect("instruction-unknown", "warning", metrics.Unknown)

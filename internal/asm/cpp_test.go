@@ -56,6 +56,32 @@ func TestPreprocessResolvesConditionals(t *testing.T) {
 	}
 }
 
+func TestPreprocessPreservesRegionComments(t *testing.T) {
+	cc := findCC()
+	if cc == "" {
+		t.Skip("no C compiler available for -cpp")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "regions.S")
+	src := "// @begin hot\nnop\nret\n// @end hot\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Preprocess(path, CPPOptions{CC: cc})
+	if err != nil {
+		t.Fatalf("Preprocess: %v", err)
+	}
+	lines := Parse(out)
+	var begins, ends int
+	for _, ln := range lines {
+		begins += len(ln.RegionBegins)
+		ends += len(ln.RegionEnds)
+	}
+	if begins != 1 || ends != 1 {
+		t.Fatalf("annotations after cpp = %d begin/%d end, want 1/1", begins, ends)
+	}
+}
+
 func TestLoadFileCPPIgnoresObjdumpText(t *testing.T) {
 	// Disassembly input must not be sent through the preprocessor.
 	dir := t.TempDir()

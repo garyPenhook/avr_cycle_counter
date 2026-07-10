@@ -278,8 +278,9 @@ a branch's nearest label, its source line as `line:N`, or a branch target label.
 Values are `taken`, `not-taken`, or a positive trip count. A trip count on a
 loop target, for example `-branch-scenario loop=10`, takes the branch nine times
 and falls through once; cycles follow that bounded path while instruction count
-and flash remain the static reachable footprint. `-path-visits N` is a coarse
-guard for repeated visits in pruned paths.
+remains the selected-path count and flash remains the static assembled footprint.
+Unknown scenario keys are rejected. `-path-visits N` is a coarse guard for
+repeated visits in pruned paths; by itself it does not select or prune a path.
 
 `-call-target` resolves an otherwise unresolved or indirect call site when you
 know the callee, for example `-call-target dispatch=handler` or
@@ -426,8 +427,8 @@ The input file is auto-detected, so the same flags work either way:
 | input | how it's read |
 |-------|---------------|
 | `.S` / `.s` | parsed as GNU-assembler source (incl. `avr-gcc -S` output) |
-| ELF / `.o` | disassembled with `avr-objdump -h -d` |
-| `.hex` | disassembled with `avr-objdump -h -D -b ihex` |
+| ELF / `.o` | disassembled with `avr-objdump -h -d -z -r` |
+| `.hex` | disassembled with `avr-objdump -h -D -z -b ihex` |
 | saved `avr-objdump -h -d` text | parsed as disassembly directly |
 
 Analyzing the **compiled** object sidesteps the source parser's blind spots —
@@ -562,7 +563,8 @@ metric.
 - **Cycles** per pass as a `min – max` range — branches/skips are
   data-dependent, so bounds are reported honestly.
 - **Flash**: instruction words × 2 (per-core; `LDS`/`STS` are 1 word on the
-  Reduced Core) plus inline data in a flash section.
+  Reduced Core), initialized `.data` load images, and data in modeled flash
+  sections such as `.rodata` and `.progmem`.
 - **SRAM (static)**: `.data`/`.bss`/`.noinit` allocations.
 - **SRAM (stack)**: peak local `PUSH` depth, plus return-address/callee stack
   bytes at the deepest direct intra-file call site (2 or 3 return-address

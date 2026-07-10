@@ -13,7 +13,6 @@ package asm
 // sizes, which a -d listing alone cannot provide.
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -34,15 +33,29 @@ var reObjInsn = regexp.MustCompile(`^\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F]{2}\s)+
 var reObjLabel = regexp.MustCompile(`^[0-9a-fA-F]+\s+<([^>]+)>:\s*$`)
 
 // "Disassembly of section .text:".
-var reObjSection = regexp.MustCompile(`^Disassembly of section (\S+):`)
+var reObjSection = regexp.MustCompile(`^Disassembly of section (\S+):\s*$`)
 
 // A section-header table row, e.g. "  2 .bss          00000020  00000000 ..".
 var reObjHeader = regexp.MustCompile(`^\s*\d+\s+(\.\S+)\s+([0-9a-fA-F]+)\s+`)
 
+// Relocation printed by objdump -r after its instruction, for example:
+// "0: R_AVR_7_PCREL .L1".
+var reObjReloc = regexp.MustCompile(`^\s*[0-9a-fA-F]+:\s+R_AVR_[A-Z0-9_]+\s+(\S+)`)
+
 // LooksLikeObjdump reports whether text is avr-objdump disassembly output rather
 // than assembler source.
 func LooksLikeObjdump(s string) bool {
-	return strings.Contains(s, "Disassembly of section ")
+	sawSection := false
+	for _, raw := range splitLines(s) {
+		if reObjSection.MatchString(raw) {
+			sawSection = true
+			continue
+		}
+		if sawSection && (reObjLabel.MatchString(raw) || reObjInsn.MatchString(raw)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isELF(b []byte) bool {
@@ -123,9 +136,9 @@ func runObjdump(bin, path string, ihex bool) (string, error) {
 		// ihex carries no format/arch metadata, and its single section is not
 		// flagged executable — so supply the arch/format and use -D (disassemble
 		// everything) rather than -d (code sections only).
-		args = []string{"-h", "-D", "-m", "avr", "-b", "ihex"}
+		args = []string{"-h", "-D", "-z", "-m", "avr", "-b", "ihex"}
 	} else {
-		args = []string{"-h", "-d"}
+		args = []string{"-h", "-d", "-z", "-r"}
 	}
 	args = append(args, path)
 
@@ -154,12 +167,9 @@ func ParseObjdump(src string) []*Line {
 	section := ".text"
 	inHeaders := false
 
-	sc := bufio.NewScanner(strings.NewReader(src))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	num := 0
-	for sc.Scan() {
+	for _, raw := range splitLines(src) {
 		num++
-		raw := sc.Text()
 
 		if strings.HasPrefix(strings.TrimSpace(raw), "Sections:") {
 			inHeaders = true
@@ -186,8 +196,22 @@ func ParseObjdump(src string) []*Line {
 			out = append(out, &Line{Num: num, Raw: raw, Section: section, Label: m[1]})
 			continue
 		}
+		if m := reObjReloc.FindStringSubmatch(raw); m != nil {
+			for i := len(out) - 1; i >= 0; i-- {
+				if out[i].Mnemonic != "" {
+					out[i].RelocTarget = m[1]
+					break
+				}
+			}
+			continue
+		}
 		if m := reObjInsn.FindStringSubmatch(raw); m != nil {
-			out = append(out, objLine(num, raw, section, m[3]))
+			address, err := strconv.ParseUint(m[1], 16, 64)
+			ln := objLine(num, raw, section, m[3])
+			if err == nil {
+				ln.Address, ln.HasAddress = address, true
+			}
+			out = append(out, ln)
 			continue
 		}
 		// file-format banner, blank lines, "..." gaps: nothing to account for.

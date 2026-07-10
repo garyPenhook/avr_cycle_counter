@@ -1,6 +1,9 @@
 package asm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A trimmed but faithful `avr-objdump -h -d` dump (attiny3217 build of the
 // delay.S example): section table, a symbol header, instructions with the
@@ -41,6 +44,9 @@ func TestLooksLikeObjdump(t *testing.T) {
 	if LooksLikeObjdump("ldi r24, 1\nret\n") {
 		t.Fatal("plain source misclassified as objdump output")
 	}
+	if LooksLikeObjdump("; Reference: Disassembly of section .text:\nnop\nret\n") {
+		t.Fatal("source comment misclassified as objdump output")
+	}
 }
 
 func TestParseObjdumpInstructions(t *testing.T) {
@@ -73,6 +79,46 @@ func TestParseObjdumpInstructions(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("instr %d = %q %q, want %q %q", i, got[i].mnem, got[i].ops, w.mnem, w.ops)
 		}
+	}
+}
+
+func TestParseObjdumpPreservesAddresses(t *testing.T) {
+	lines := ParseObjdump(sampleObjdump)
+	for _, ln := range lines {
+		if ln.Mnemonic == "STS" {
+			if !ln.HasAddress || ln.Address != 0x0a {
+				t.Fatalf("STS address = %#x, present=%t; want 0x0a,true", ln.Address, ln.HasAddress)
+			}
+			return
+		}
+	}
+	t.Fatal("STS not found")
+}
+
+func TestParseObjdumpPreservesRelocationTarget(t *testing.T) {
+	lines := ParseObjdump(`
+Disassembly of section .text:
+   0:  01 f4        brne .+0 ; 0x2
+            0: R_AVR_7_PCREL .Ldone
+00000004 <.Ldone>:
+   4:  08 95        ret
+`)
+	for _, ln := range lines {
+		if ln.Mnemonic == "BRNE" {
+			if ln.RelocTarget != ".Ldone" {
+				t.Fatalf("relocation target = %q, want .Ldone", ln.RelocTarget)
+			}
+			return
+		}
+	}
+	t.Fatal("BRNE not found")
+}
+
+func TestParseObjdumpHandlesOverlongLine(t *testing.T) {
+	src := "Disassembly of section .text:\n" + strings.Repeat("x", 2<<20) + "\n   0:\t08 95       \tret\n"
+	lines := ParseObjdump(src)
+	if got := countMnemonic(lines, "RET"); got != 1 {
+		t.Fatalf("RET count = %d, want 1 after overlong line", got)
 	}
 }
 
